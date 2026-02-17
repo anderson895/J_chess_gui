@@ -173,8 +173,3 @@ engines/               ← optional, for your playing engines
 | Analyzer shows ⚠ Failed | The engine was found but could not start — check it is not corrupted and (on Linux/macOS) has execute permission: `chmod +x analyzer/stockfish` |
 | No move quality badges appear | Analyzer is not loaded — set it up as described above |
 | Eval bar stays at 0.0 | Same as above — requires the analyzer engine |
-
-
-**Option C — Full one-liner (no .spec file needed):**
-```
-pyinstaller --onefile --windowed --icon=assets\logo.ico --add-data "assets\logo.ico;assets" --name "ChessEngineArena" chess_arena.py
