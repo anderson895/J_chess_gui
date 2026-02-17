@@ -206,7 +206,8 @@ Move delay (s): 1-2 = Good for watching
 
 2. **Create Executable**
    ```bash
-   pyinstaller --onefile --windowed --name "ChessArena" chess_arena.py
+   pyinstaller --onefile --windowed --icon=assets/logo.ico --add-data "chess_arena.db;." chess_arena.py
+
    ```
 
 3. **Find Your .exe**
