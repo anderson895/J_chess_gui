@@ -1,10 +1,11 @@
 """
-Chess Engine Arena — Enhanced Edition (Fixed)
+Chess Engine Arena — Enhanced Edition (with Opening Detection)
 - Engine 1 = BLACK pieces, Engine 2 = WHITE pieces
 - Board default: White side at bottom (standard orientation)
 - White still moves first per chess rules (UCI standard)
 - Engine names displayed on the board
 - Beautiful game-over dialog with winner's name
+- OPENING DETECTION: reads openings_sheet.csv, shows ECO + name live
 Full UCI engine support, complete chess rule accuracy:
   • Legal move generation (all pieces, castling, en passant, promotion)
   • Check / checkmate / stalemate detection
@@ -15,6 +16,7 @@ Full UCI engine support, complete chess rule accuracy:
   • PGN export
   • FIXED: Persistent SQLite database (no more resets)
   • NEW: Search in Statistics and Game History windows
+  • NEW: Live opening name display from openings_sheet.csv
 """
 
 import tkinter as tk
@@ -25,6 +27,7 @@ import time
 import queue
 import os
 import sys
+import csv
 import sqlite3
 from datetime import datetime
 
@@ -74,15 +77,120 @@ def normalize_engine_name(name):
 
 
 def get_db_path():
-    """
-    Return a STABLE, persistent path for the SQLite database.
-    Uses the user's home directory so it survives restarts and
-    never resets even if the script is moved or run from a different cwd.
-    """
     home = os.path.expanduser("~")
     db_dir = os.path.join(home, ".chess_arena")
     os.makedirs(db_dir, exist_ok=True)
     return os.path.join(db_dir, "chess_arena.db")
+
+
+# ═══════════════════════════════════════════════════════════
+#  Opening Book  (reads openings_sheet.csv)
+# ═══════════════════════════════════════════════════════════
+
+class OpeningBook:
+    """
+    Loads a CSV with columns: ECO, name, moves
+    'moves' is a space-separated sequence of UCI moves (e.g. "e2e4 e7e5").
+    Supports short algebraic (e4, d4, Nf3…) as well as full UCI (e2e4…).
+    Matching: longest prefix wins.
+    """
+
+    # Mapping from short algebraic-style tokens to UCI (for common pawn moves)
+    # We convert SAN-style "e4" → "e2e4" by trying a Board simulation.
+
+    def __init__(self, csv_path=None):
+        self._entries = []  # list of (uci_moves_tuple, eco, name)
+        if csv_path and os.path.isfile(csv_path):
+            self._load(csv_path)
+
+    def _load(self, path):
+        """Parse the CSV. Each row: ECO, name, moves (space-separated SAN or UCI)."""
+        try:
+            with open(path, newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    eco  = (row.get('ECO') or '').strip()
+                    name = (row.get('name') or '').strip()
+                    raw  = (row.get('moves') or '').strip()
+                    if not raw:
+                        continue
+                    tokens = raw.split()
+                    uci_seq = self._tokens_to_uci(tokens)
+                    if uci_seq is not None:
+                        self._entries.append((tuple(uci_seq), eco, name))
+            # Sort by length descending so longest match is found first
+            self._entries.sort(key=lambda x: len(x[0]), reverse=True)
+        except Exception as e:
+            print(f"[OpeningBook] Failed to load {path}: {e}")
+
+    def _tokens_to_uci(self, tokens):
+        """
+        Convert a list of move tokens to UCI.
+        Tokens may be:
+          - Already UCI (e.g. "e2e4")  → kept as-is
+          - Short algebraic (e.g. "e4", "Nf3") → converted via Board simulation
+        Returns list of UCI strings, or None on failure.
+        """
+        board = Board()
+        uci_list = []
+        for tok in tokens:
+            tok = tok.strip()
+            if not tok:
+                continue
+            # Try as raw UCI first (length 4 or 5, lowercase)
+            if self._looks_like_uci(tok):
+                try:
+                    board.apply_uci(tok)
+                    uci_list.append(tok)
+                    continue
+                except Exception:
+                    pass
+            # Try as SAN
+            uci = self._san_to_uci(board, tok)
+            if uci is None:
+                return None
+            board.apply_uci(uci)
+            uci_list.append(uci)
+        return uci_list
+
+    @staticmethod
+    def _looks_like_uci(tok):
+        if len(tok) not in (4, 5):
+            return False
+        return (tok[0] in 'abcdefgh' and tok[1].isdigit() and
+                tok[2] in 'abcdefgh' and tok[3].isdigit())
+
+    @staticmethod
+    def _san_to_uci(board, san):
+        """Find the legal move matching this SAN token and return its UCI."""
+        san_clean = san.replace('+', '').replace('#', '').replace('x', '')
+        legal = board.legal_moves()
+        for move in legal:
+            fr, fc, tr, tc, promo = move
+            test_san = board._build_san(fr, fc, tr, tc, promo, legal)
+            test_clean = test_san.replace('+','').replace('#','').replace('x','')
+            if test_clean == san_clean or test_san == san:
+                uci = f"{chr(ord('a')+fc)}{8-fr}{chr(ord('a')+tc)}{8-tr}"
+                if promo:
+                    uci += promo
+                return uci
+        return None
+
+    def lookup(self, uci_moves):
+        """
+        Given a list of UCI moves played so far, return (eco, name) of the
+        best (longest) matching opening, or (None, None) if no match.
+        """
+        played = tuple(uci_moves)
+        for seq, eco, name in self._entries:
+            n = len(seq)
+            if len(played) >= n and played[:n] == seq:
+                return eco, name
+        return None, None
+
+    @property
+    def loaded(self):
+        return len(self._entries) > 0
 
 
 # ═══════════════════════════════════════════════════════════
@@ -467,6 +575,9 @@ class Board:
     def uci_moves_str(self):
         return ' '.join(m[0] for m in self.move_history)
 
+    def uci_moves_list(self):
+        return [m[0] for m in self.move_history]
+
     def material(self):
         if self._material_cache is not None:
             return self._material_cache
@@ -627,10 +738,11 @@ class UCIEngine:
 #  PGN
 # ═══════════════════════════════════════════════════════════
 
-def build_pgn(white, black, moves, result, date):
+def build_pgn(white, black, moves, result, date, opening_name=None):
+    opening_tag = f'[Opening "{opening_name}"]\n' if opening_name else ''
     hdr = (f'[Event "Engine Match"]\n[Site "Chess Engine Arena"]\n'
            f'[Date "{date}"]\n[Round "1"]\n[White "{white}"]\n'
-           f'[Black "{black}"]\n[Result "{result}"]\n\n')
+           f'[Black "{black}"]\n[Result "{result}"]\n{opening_tag}\n')
     body=''; sans=[m[1] for m in moves]
     for i,san in enumerate(sans):
         if i%2==0: body+=f"{i//2+1}. "
@@ -644,7 +756,6 @@ def build_pgn(white, black, moves, result, date):
 # ═══════════════════════════════════════════════════════════
 
 def ask_promotion(root, color):
-    """Show a promotion dialog and return chosen piece ('q','r','b','n')."""
     result = [None]
     dialog = tk.Toplevel(root)
     dialog.title("Promote Pawn")
@@ -693,7 +804,6 @@ def ask_promotion(root, color):
 # ═══════════════════════════════════════════════════════════
 
 def make_search_bar(parent, on_search_cb, placeholder="🔍 Search…"):
-    """Returns (frame, StringVar) for a live search bar."""
     frame = tk.Frame(parent, bg=PANEL_BG)
     var = tk.StringVar()
 
@@ -706,7 +816,6 @@ def make_search_bar(parent, on_search_cb, placeholder="🔍 Search…"):
                      highlightcolor=ACCENT, highlightbackground='#333')
     entry.pack(side='left', fill='x', expand=True, ipady=5, padx=(0, 4))
 
-    # Placeholder
     entry.insert(0, placeholder)
     entry.config(fg='#666')
 
@@ -757,7 +866,7 @@ class ChessGUI:
         self.root.title("♟  Chess Engine Arena — Enhanced")
         self.root.configure(bg=BG)
         self.root.resizable(True,True)
-        self.root.minsize(1060,780)
+        self.root.minsize(1060,820)  # slightly taller for opening bar
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
         self.board=Board()
@@ -787,13 +896,58 @@ class ChessGUI:
         self.e1_depth=tk.StringVar(value='—')
         self.e2_depth=tk.StringVar(value='—')
 
-        # ── FIXED: use stable home-dir path so DB never resets ──
+        # ── Opening display StringVar ──
+        self.opening_var = tk.StringVar(value="📖  Loading openings…")
+        self.current_opening_name = None   # track for PGN export
+        self._opening_csv_path = None
+
+        # ── Load opening book ──
+        # Search in multiple locations for openings_sheet.csv
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+        except NameError:
+            script_dir = os.getcwd()
+
+        # Build candidate paths — check every reasonable location
+        _cwd = os.getcwd()
+        _sdir = script_dir
+        csv_candidates = []
+        for _base in [_cwd, _sdir]:
+            for _sub in ["opening", "openings", ""]:
+                for _name in ["openings_sheet.csv", "openings.csv"]:
+                    if _sub:
+                        csv_candidates.append(os.path.join(_base, _sub, _name))
+                    else:
+                        csv_candidates.append(os.path.join(_base, _name))
+        self.opening_book = None
+        self._opening_csv_path = None
+        for path in csv_candidates:
+            if os.path.isfile(path):
+                self.opening_book = OpeningBook(path)
+                self._opening_csv_path = path
+                print(f"[OpeningBook] Loaded {len(self.opening_book._entries)} entries from {path}")
+                break
+        if self.opening_book is None:
+            print(f"[OpeningBook] CSV not found. Searched: {csv_candidates}")
+            self.opening_book = OpeningBook()  # empty, won't crash
+
         self.db_path = get_db_path()
         self._init_database()
 
         self._build_ui()
         self._draw_board()
-        self._status(f"DB: {self.db_path} | Load engines and press ▶ Start")
+
+        # Update opening banner now that UI is built
+        self._reset_opening()
+        # Show CSV load status in window title for easy debugging
+        if self.opening_book and self.opening_book.loaded:
+            short = os.path.basename(self._opening_csv_path or "")
+            self.root.title(f"♟  Chess Engine Arena — {len(self.opening_book._entries)} openings ({short})")
+
+        book_status = (f"📖 {len(self.opening_book._entries)} openings loaded"
+                       if self.opening_book.loaded
+                       else "⚠ No openings CSV — place openings_sheet.csv beside this script")
+        self._status(f"DB: {self.db_path} | {book_status} | Load engines and press ▶ Start")
 
     def _on_closing(self):
         if self.game_running:
@@ -802,10 +956,61 @@ class ChessGUI:
         self._kill_engines()
         self.root.destroy()
 
+    # ─── Opening helpers ──────────────────────────────────────────────────────
+
+    def _refresh_opening(self):
+        """Check current board move list against opening book and update the label."""
+        if not self.opening_book or not self.opening_book.loaded:
+            return
+        moves = self.board.uci_moves_list()
+        eco, name = self.opening_book.lookup(moves)
+        if name:
+            self.current_opening_name = name
+            display = f"📖  {eco}  ·  {name}" if eco else f"📖  {name}"
+            self.opening_var.set(display)
+        elif self.current_opening_name:
+            # Keep last matched opening visible when game goes out of book
+            self.opening_var.set(f"📖  {self.current_opening_name}")
+
+    def _reset_opening(self):
+        self.current_opening_name = None
+        if self.opening_book and self.opening_book.loaded:
+            self.opening_var.set(f"📖  {len(self.opening_book._entries)} openings ready")
+        else:
+            self.opening_var.set("⚠  No openings CSV — use 📂 Load Openings CSV button")
+
+    def _update_book_lbl(self):
+        if not hasattr(self, 'book_lbl'): return
+        if self.opening_book and self.opening_book.loaded:
+            name = os.path.basename(self._opening_csv_path) if self._opening_csv_path else "loaded"
+            self.book_lbl.config(
+                text=f"✓ {len(self.opening_book._entries)} openings  ({name})",
+                fg="#00BFFF")
+        else:
+            self.book_lbl.config(text="⚠ No CSV loaded", fg="#FF8800")
+
+    def _browse_csv(self):
+        path = filedialog.askopenfilename(
+            title="Select Openings CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+        if not path: return
+        try:
+            book = OpeningBook(path)
+            if not book.loaded:
+                messagebox.showerror("Error", f"No valid openings found in:\n{path}")
+                return
+            self.opening_book = book
+            self._opening_csv_path = path
+            self._update_book_lbl()
+            self._reset_opening()
+            messagebox.showinfo("Loaded",
+                f"✓ {len(book._entries)} openings loaded from:\n{os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load CSV:\n{e}")
+
     # ─── Database methods ─────────────────────────────────────────────────────
 
     def _init_database(self):
-        """Initialize DB with WAL mode for better concurrency / no corruption."""
         conn = sqlite3.connect(self.db_path)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
@@ -855,12 +1060,9 @@ class ChessGUI:
             cursor.execute('SELECT DISTINCT black_engine FROM games')
             blacks = {normalize_engine_name(r[0]) for r in cursor.fetchall()}
             engines = sorted(whites | blacks)
-
-            # Apply search filter
             if search_query:
                 q = search_query.lower()
                 engines = [e for e in engines if q in e.lower()]
-
             stats = []
             for engine in engines:
                 cursor.execute('SELECT COUNT(*) FROM games WHERE white_engine = ? OR black_engine = ?', (engine, engine))
@@ -895,8 +1097,6 @@ class ChessGUI:
                     FROM games ORDER BY id DESC''')
             games = cursor.fetchall()
             conn.close()
-
-            # Client-side search filter (covers all visible columns)
             if search_query:
                 q = search_query.lower()
                 filtered = []
@@ -922,7 +1122,7 @@ class ChessGUI:
             print(f"Database error: {e}")
             return None
 
-    # ─── Statistics window with search ────────────────────────────────────────
+    # ─── Statistics window ────────────────────────────────────────────────────
 
     def _show_statistics(self):
         stats_window = tk.Toplevel(self.root)
@@ -935,11 +1135,10 @@ class ChessGUI:
         tk.Label(stats_window, text=f"📁 {self.db_path}", bg=BG, fg="#555",
                  font=('Consolas', 8), wraplength=700).pack(pady=(0, 6))
 
-        # ── Search bar ──
         search_frame = tk.Frame(stats_window, bg=BG)
         search_frame.pack(fill='x', padx=20, pady=(0, 6))
 
-        all_stats = [None]  # mutable container so inner func can update
+        all_stats = [None]
         tree_ref  = [None]
 
         def refresh_stats(query=''):
@@ -1028,10 +1227,9 @@ class ChessGUI:
                   bg=BTN_BG, fg=TEXT, font=('Segoe UI', 10),
                   padx=15, pady=8, cursor='hand2').pack(side='right', padx=5)
 
-        # Initial load
         refresh_stats('')
 
-    # ─── Game history window with search ─────────────────────────────────────
+    # ─── Game history window ──────────────────────────────────────────────────
 
     def _show_game_history(self, filter_engine=None):
         history_window = tk.Toplevel(self.root)
@@ -1040,7 +1238,6 @@ class ChessGUI:
         history_window.configure(bg=BG)
         history_window.geometry("960x640")
 
-        # Header
         header_frame = tk.Frame(history_window, bg=BG)
         header_frame.pack(fill='x', padx=20, pady=(12, 0))
         tk.Label(header_frame, text="📜 GAME HISTORY", bg=BG, fg=ACCENT,
@@ -1054,7 +1251,6 @@ class ChessGUI:
                       bg=BTN_BG, fg=TEXT, font=('Segoe UI', 9), padx=10, pady=4,
                       cursor='hand2', relief='flat').pack(side='right')
 
-        # ── Search bar ──
         search_container = tk.Frame(history_window, bg=BG)
         search_container.pack(fill='x', padx=20, pady=(8, 4))
 
@@ -1084,7 +1280,6 @@ class ChessGUI:
                                         placeholder="🔍 Search by engine, result, reason, date…")
         sb_frame2.pack(fill='x')
 
-        # Tree
         tree_frame = tk.Frame(history_window, bg=BG)
         tree_frame.pack(fill='both', expand=True, padx=20, pady=(4, 0))
         scrollbar = tk.Scrollbar(tree_frame)
@@ -1111,21 +1306,6 @@ class ChessGUI:
         tk.Label(history_window,
                  text="💡 Double-click a row to view PGN   |   Click White/Black cell to filter by engine",
                  bg=BG, fg="#444", font=('Segoe UI', 8)).pack(pady=(0, 4))
-
-        def view_pgn(event=None):
-            selected = tree.selection()
-            if not selected:
-                if event is None:
-                    messagebox.showinfo("No Selection", "Please select a game.")
-                return
-            item = tree.item(selected[0])
-            game_id = item['values'][0]
-            pgn = self._get_game_pgn(game_id)
-            if pgn:
-                self._show_pgn_viewer(pgn, item['values'],
-                                      all_games_cache[0] or [], tree)
-            else:
-                messagebox.showerror("Error", "Could not load PGN.")
 
         def _on_tree_click(event, double=False):
             region = tree.identify_region(event.x, event.y)
@@ -1158,6 +1338,20 @@ class ChessGUI:
         btn_frame = tk.Frame(history_window, bg=BG)
         btn_frame.pack(fill='x', padx=20, pady=(4, 12))
 
+        def view_pgn():
+            selected = tree.selection()
+            if not selected:
+                messagebox.showinfo("No Selection", "Please select a game.")
+                return
+            item = tree.item(selected[0])
+            game_id = item['values'][0]
+            pgn = self._get_game_pgn(game_id)
+            if pgn:
+                self._show_pgn_viewer(pgn, item['values'],
+                                      all_games_cache[0] or [], tree)
+            else:
+                messagebox.showerror("Error", "Could not load PGN.")
+
         tk.Button(btn_frame, text="View PGN", command=view_pgn,
                   bg=ACCENT, fg=TEXT, font=('Segoe UI', 10, 'bold'),
                   padx=15, pady=8, cursor='hand2').pack(side='left', padx=5)
@@ -1178,10 +1372,9 @@ class ChessGUI:
                   bg=BTN_BG, fg=TEXT, font=('Segoe UI', 10),
                   padx=15, pady=8, cursor='hand2').pack(side='right', padx=5)
 
-        # Initial load
         refresh_history('')
 
-    # ─── PGN viewer (unchanged except minor cleanup) ──────────────────────────
+    # ─── PGN viewer ───────────────────────────────────────────────────────────
 
     def _show_pgn_viewer(self, pgn, game_info, all_games, tree_ref=None):
         pgn_window = tk.Toplevel(self.root)
@@ -1250,6 +1443,20 @@ class ChessGUI:
         moves_list = self._parse_pgn_moves(pgn)
         current_move_index = [0]
 
+        # Opening label in PGN viewer
+        replay_opening_var = tk.StringVar(value="")
+        tk.Label(left_frame, textvariable=replay_opening_var,
+                 bg=BG, fg="#00BFFF", font=('Segoe UI', 9, 'italic'),
+                 anchor='center').pack(fill='x', padx=4)
+
+        def _update_replay_opening():
+            moves = replay_board.uci_moves_list()
+            eco, name = self.opening_book.lookup(moves)
+            if name:
+                replay_opening_var.set(f"📖 {eco}  ·  {name}" if eco else f"📖 {name}")
+            else:
+                replay_opening_var.set("")
+
         def draw_replay_board(highlight_move=None):
             replay_canvas.delete('all')
             lm_from = lm_to = None
@@ -1275,6 +1482,7 @@ class ChessGUI:
                         replay_canvas.create_text(cx+1, cy+2, text=sym, font=('Segoe UI', fsz), fill=sh)
                         replay_canvas.create_text(cx,   cy,   text=sym, font=('Segoe UI', fsz), fill=fg)
             replay_canvas.create_rectangle(0, 0, replay_size*8, replay_size*8, outline='#555', width=1)
+            _update_replay_opening()
 
         def update_move_label():
             total   = len(moves_list)
@@ -1521,6 +1729,13 @@ class ChessGUI:
         self.mat_lbl=tk.Label(p,text="=",bg=PANEL_BG,fg=TEXT,
                               font=('Consolas',9),anchor='center')
         self.mat_lbl.pack(fill='x',padx=10)
+        tk.Frame(p,bg='#2a2a4a',height=1).pack(fill='x',padx=10,pady=4)
+        # Opening book status
+        self.book_lbl = tk.Label(p, text="", bg=PANEL_BG, fg="#00BFFF",
+                                  font=('Segoe UI', 7), anchor='w', wraplength=240)
+        self.book_lbl.pack(fill='x', padx=10)
+        self._btn(p, "📂  Load Openings CSV", self._browse_csv, small=True).pack(fill='x', padx=10, pady=2)
+        self._update_book_lbl()
 
     def _build_config_ui(self):
         for widget in self.config_frame.winfo_children():
@@ -1589,14 +1804,28 @@ class ChessGUI:
     def _build_center(self, p):
         self.status_lbl=tk.Label(p,text="",bg=BG,fg=ACCENT,
                                   font=('Segoe UI',11,'bold'),anchor='center')
-        self.status_lbl.grid(row=0,column=0,sticky='ew',pady=(0,4))
+        self.status_lbl.grid(row=0,column=0,sticky='ew',pady=(0,2))
+
+        # ── Opening name banner — always visible, shows placeholder when no opening ──
+        self.opening_lbl = tk.Label(
+            p,
+            textvariable=self.opening_var,
+            bg="#0D1B2A", fg="#00BFFF",
+            font=('Segoe UI', 10, 'italic'),
+            anchor='center', pady=5,
+            relief='flat',
+            highlightthickness=1, highlightbackground="#003366",
+            height=1,
+        )
+        self.opening_lbl.grid(row=1, column=0, sticky='ew', pady=(0, 3))
+
         self.black_banner=tk.Label(p, textvariable=self.e1_name,
             bg="#1a1a2a", fg="#C8C8C8", font=('Segoe UI',11,'bold'),
             anchor='center', pady=6, relief='flat',
             highlightthickness=1, highlightbackground="#444444")
-        self.black_banner.grid(row=1,column=0,sticky='ew',pady=(0,3))
+        self.black_banner.grid(row=2,column=0,sticky='ew',pady=(0,3))
         board_row=tk.Frame(p,bg=BG)
-        board_row.grid(row=2,column=0)
+        board_row.grid(row=3,column=0)
         rf=tk.Frame(board_row,bg=BG); rf.pack(side='left')
         self.rank_labels=[]
         sz=self.sq_size
@@ -1624,11 +1853,11 @@ class ChessGUI:
             bg="#1c2a1c", fg="#FFD700", font=('Segoe UI',11,'bold'),
             anchor='center', pady=6, relief='flat',
             highlightthickness=1, highlightbackground="#555500")
-        self.white_banner.grid(row=3,column=0,sticky='ew',pady=(3,0))
+        self.white_banner.grid(row=4,column=0,sticky='ew',pady=(3,0))
         self._update_coords()
         self.check_lbl=tk.Label(p,text="",bg=BG,fg=CHECK_SQ,
                                  font=('Segoe UI',10,'bold'),anchor='center')
-        self.check_lbl.grid(row=4,column=0,sticky='ew',pady=(4,0))
+        self.check_lbl.grid(row=5,column=0,sticky='ew',pady=(4,0))
 
     def _build_right(self,p):
         tk.Label(p,text="GAME LOG",bg=PANEL_BG,fg=ACCENT,
@@ -1647,6 +1876,7 @@ class ChessGUI:
         self.move_text.tag_config('white', foreground="#FFD700",font=('Consolas',9,'bold'))
         self.move_text.tag_config('chk',   foreground="#FF8800",font=('Consolas',9,'bold'))
         self.move_text.tag_config('result',foreground=ACCENT,   font=('Consolas',10,'bold'))
+        self.move_text.tag_config('opening', foreground="#00BFFF", font=('Consolas',9,'italic'))
         tk.Frame(p,bg='#2a2a4a',height=1).pack(fill='x',padx=10,pady=2)
         self._lbl(p,"Engine Output:",9,bold=True).pack(fill='x',padx=10,pady=(4,2))
         ef=tk.Frame(p,bg=LOG_BG,highlightthickness=1,highlightbackground='#333')
@@ -1814,6 +2044,7 @@ class ChessGUI:
 
         self.root.after(0, self._draw_board)
         self.root.after(0, self._update_info)
+        self.root.after(0, self._refresh_opening)
 
         if human_color == "black":
             self._pending_b = (move_num, san)
@@ -1857,6 +2088,7 @@ class ChessGUI:
         if w_san:
             tw='chk' if ('+' in w_san or '#' in w_san) else 'white'
             self.move_text.insert('end',f"{w_san}  ",tw)
+
         self.move_text.see('end'); self.move_text.config(state='disabled')
 
     def _log_result(self,txt):
@@ -2029,6 +2261,7 @@ class ChessGUI:
 
         self.root.after(0, self._draw_board)
         self.root.after(0, self._update_info)
+        self.root.after(0, self._refresh_opening)
 
         def _log():
             if engine_color == 'black':
@@ -2077,6 +2310,7 @@ class ChessGUI:
         self.board.reset(); self.last_move=None; self._pending_b=None
         self.selected_square = None
         self._engine_thinking = False
+        self._reset_opening()
         self._draw_board(); self._update_info()
         for v in (self.e1_eval,self.e2_eval,self.e1_depth,self.e2_depth): v.set('—')
         self.mat_lbl.config(text="=")
@@ -2115,6 +2349,7 @@ class ChessGUI:
         self.selected_square = None
         self._engine_thinking = False
         self.board_lock = threading.Lock()
+        self._reset_opening()
         for w in (self.move_text,self.eng_log):
             w.config(state='normal'); w.delete('1.0','end'); w.config(state='disabled')
         self._draw_board(); self._update_info()
@@ -2134,14 +2369,15 @@ class ChessGUI:
             messagebox.showinfo("PGN","No moves to export yet."); return
         pgn=build_pgn(self.e2_name.get(),self.e1_name.get(),
                       self.board.move_history,self.game_result or '*',
-                      self.game_date or datetime.now().strftime("%Y.%m.%d"))
+                      self.game_date or datetime.now().strftime("%Y.%m.%d"),
+                      opening_name=self.current_opening_name)
         path=filedialog.asksaveasfilename(defaultextension=".pgn",
             filetypes=[("PGN","*.pgn"),("All","*.*")], title="Save PGN")
         if path:
             with open(path,'w') as f: f.write(pgn)
             messagebox.showinfo("Saved",f"PGN saved:\n{path}")
 
-    # ─── Game over dialog ──────────────────────────────────────────────────────
+    # ─── Game over dialog ─────────────────────────────────────────────────────
 
     def _show_game_over_dialog(self, result, reason, winner_name):
         dialog = tk.Toplevel(self.root)
@@ -2151,7 +2387,7 @@ class ChessGUI:
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.update_idletasks()
-        w = 450; h = 300
+        w = 450; h = 320
         x = (dialog.winfo_screenwidth() // 2) - (w // 2)
         y = (dialog.winfo_screenheight() // 2) - (h // 2)
         dialog.geometry(f'{w}x{h}+{x}+{y}')
@@ -2169,11 +2405,15 @@ class ChessGUI:
             clean_name = normalize_engine_name(winner_name)
             tk.Label(main_frame, text=clean_name, bg=BG, fg=TEXT,
                      font=('Segoe UI', 20, 'bold')).pack(pady=5)
-        tk.Frame(main_frame, bg=ACCENT, height=2).pack(fill='x', pady=15)
+        tk.Frame(main_frame, bg=ACCENT, height=2).pack(fill='x', pady=10)
         tk.Label(main_frame, text=f"Result: {result}", bg=BG, fg="#AAA",
                  font=('Segoe UI', 12)).pack(pady=2)
         tk.Label(main_frame, text=reason, bg=BG, fg="#888",
                  font=('Segoe UI', 11)).pack(pady=2)
+        # Show opening if detected
+        if self.current_opening_name:
+            tk.Label(main_frame, text=f"📖  {self.current_opening_name}",
+                     bg=BG, fg="#00BFFF", font=('Segoe UI', 10, 'italic')).pack(pady=4)
         btn_frame = tk.Frame(dialog, bg=BG)
         btn_frame.pack(fill='x', padx=20, pady=(0, 20))
         def close_dialog(): dialog.destroy()
@@ -2244,6 +2484,7 @@ class ChessGUI:
             move_num=(len(self.board.move_history)+1)//2
             self.root.after(0,self._draw_board)
             self.root.after(0,self._update_info)
+            self.root.after(0,self._refresh_opening)
             if is_b:
                 self._pending_b=(move_num,san)
             else:
@@ -2274,7 +2515,8 @@ class ChessGUI:
             white_name = self.e2_name.get()
             black_name = self.e1_name.get()
         pgn = build_pgn(white_name, black_name, self.board.move_history, result,
-                        self.game_date or datetime.now().strftime("%Y.%m.%d"))
+                        self.game_date or datetime.now().strftime("%Y.%m.%d"),
+                        opening_name=self.current_opening_name)
         self._save_game_to_db(white_name, black_name, result, reason, pgn, duration_seconds)
         if winner_name:
             msg = f"🏆 {winner_name} WINS!\n{reason}"
@@ -2291,7 +2533,7 @@ class ChessGUI:
 
 def main():
     root=tk.Tk()
-    root.minsize(1060,780)
+    root.minsize(1060,820)
     try: root.iconbitmap("")
     except Exception: pass
     ChessGUI(root)
