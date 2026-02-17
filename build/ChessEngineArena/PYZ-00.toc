@@ -1,4 +1,4 @@
-('D:\\Downloads\\JCHESS_GUI\\build\\ChessEngineArena\\PYZ-00.pyz',
+('D:\\Downloads\\JCHESS_GUI\\Chess_Engine_Arena\\build\\ChessEngineArena\\PYZ-00.pyz',
  [('_compat_pickle',
    'C:\\Program Files\\Python310\\lib\\_compat_pickle.py',
    'PYMODULE'),

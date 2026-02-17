@@ -5,7 +5,7 @@ a = Analysis(
     ['chess_arena.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets\\logo.ico', 'assets')],
+    datas=[('opening', 'opening'), ('analyzer', 'analyzer'), ('assets/logo.ico', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
