@@ -869,6 +869,165 @@ def ask_promotion(root, color):
 
 
 # ═══════════════════════════════════════════════════════════
+#  Stop Game — Result Entry Dialog
+# ═══════════════════════════════════════════════════════════
+
+def ask_stop_result(root, white_name, black_name):
+    """
+    Show a dialog asking the user to record the result before stopping.
+    Returns (result_str, reason_str) or (None, None) if aborted.
+    """
+    result_val = [None]
+    reason_val = [None]
+
+    dialog = tk.Toplevel(root)
+    dialog.title("⏹  Stop Game — Enter Result")
+    dialog.configure(bg=BG)
+    dialog.resizable(True, True)
+    dialog.transient(root)
+    dialog.grab_set()
+
+    # Size to 60% of screen height max, minimum 480px tall
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    w  = min(600, sw - 80)
+    h  = min(500, sh - 100)
+    h  = max(h, 480)
+    x  = (sw - w) // 2
+    y  = (sh - h) // 2
+    dialog.geometry(f'{w}x{h}+{x}+{y}')
+    dialog.minsize(480, 420)
+
+    chosen_result = tk.StringVar(value="")
+    chosen_reason = tk.StringVar(value="")
+
+    # ── Header ────────────────────────────────────────────
+    hdr = tk.Frame(dialog, bg=BG)
+    hdr.pack(fill='x', padx=24, pady=(20, 0))
+    tk.Label(hdr, text="⏹  STOP GAME", bg=BG, fg=ACCENT,
+             font=('Segoe UI', 17, 'bold')).pack(anchor='w')
+    tk.Frame(dialog, bg=ACCENT, height=2).pack(fill='x', padx=24, pady=(8, 12))
+    tk.Label(dialog, text="Select the result to record before stopping:",
+             bg=BG, fg=TEXT, font=('Segoe UI', 11)).pack(anchor='w', padx=24, pady=(0, 10))
+
+    # ── Result buttons ────────────────────────────────────
+    btn_area = tk.Frame(dialog, bg=BG)
+    btn_area.pack(fill='x', padx=24)
+
+    RESULTS = [
+        ("1-0",     f"⬜  {normalize_engine_name(white_name)} wins  (White)", "#FFD700"),
+        ("0-1",     f"⬛  {normalize_engine_name(black_name)} wins  (Black)", "#C8C8C8"),
+        ("1/2-1/2", "½ - ½   Draw",                                            "#00BFFF"),
+        ("*",       "✕   No result / Abort",                                   "#777777"),
+    ]
+
+    result_btns = {}
+    for res, label, color in RESULTS:
+        b = tk.Button(
+            btn_area, text=label,
+            command=lambda r=res: _pick(r),
+            bg=BTN_BG, fg=color,
+            activebackground=ACCENT, activeforeground='white',
+            relief='flat', font=('Segoe UI', 11, 'bold'),
+            padx=14, pady=10, cursor='hand2', anchor='w',
+            highlightthickness=2, highlightbackground=BTN_BG)
+        b.pack(fill='x', pady=3)
+        result_btns[res] = b
+
+    def _pick(res):
+        chosen_result.set(res)
+        for r2, b2 in result_btns.items():
+            _, _, col = RESULTS[next(i for i, (rv, _, _) in enumerate(RESULTS) if rv == r2)]
+            if r2 == res:
+                b2.config(bg=ACCENT, highlightbackground=ACCENT, fg='white')
+            else:
+                b2.config(bg=BTN_BG, highlightbackground=BTN_BG, fg=col)
+        _update_reasons(res)
+        confirm_btn.config(state='normal')
+
+    # ── Reason dropdown ───────────────────────────────────
+    REASON_OPTIONS = {
+        "1-0": [
+            "White wins",
+            "White wins on time",
+            "Black resigned",
+            "Black forfeits",
+            "Illegal move by Black",
+        ],
+        "0-1": [
+            "Black wins",
+            "Black wins on time",
+            "White resigned",
+            "White forfeits",
+            "Illegal move by White",
+        ],
+        "1/2-1/2": [
+            "Draw by agreement",
+            "Stalemate",
+            "Draw by repetition",
+            "Draw by 50-move rule",
+            "Draw by insufficient material",
+        ],
+        "*": [
+            "Game aborted",
+            "No result",
+            "Stopped by user",
+        ],
+    }
+
+    tk.Label(dialog, text="Reason:", bg=BG, fg="#AAA",
+             font=('Segoe UI', 10)).pack(anchor='w', padx=24, pady=(14, 3))
+
+    reason_combo = ttk.Combobox(
+        dialog, textvariable=chosen_reason,
+        font=('Segoe UI', 10), state='disabled',
+        values=[], height=8)
+    reason_combo.pack(fill='x', padx=24, ipady=4)
+
+    def _update_reasons(res):
+        opts = REASON_OPTIONS.get(res, ["Stopped by user"])
+        reason_combo.config(values=opts, state='readonly')
+        chosen_reason.set(opts[0])
+
+    # ── Footer buttons (always at bottom) ────────────────
+    foot = tk.Frame(dialog, bg=BG)
+    foot.pack(side='bottom', fill='x', padx=24, pady=18)
+
+    def _confirm():
+        r = chosen_result.get()
+        if not r:
+            messagebox.showwarning("No Result", "Please select a result first.",
+                                   parent=dialog)
+            return
+        reason_text = chosen_reason.get().strip() or "Stopped by user"
+        result_val[0] = r
+        reason_val[0] = reason_text
+        dialog.destroy()
+
+    def _cancel():
+        dialog.destroy()
+
+    confirm_btn = tk.Button(
+        foot, text="✔  Confirm & Stop", command=_confirm,
+        bg=ACCENT, fg='white', activebackground=BTN_HOV,
+        relief='flat', font=('Segoe UI', 12, 'bold'),
+        padx=16, pady=10, cursor='hand2', state='disabled')
+    confirm_btn.pack(side='left', expand=True, fill='x', padx=(0, 8))
+
+    cancel_btn = tk.Button(
+        foot, text="✕  Cancel", command=_cancel,
+        bg=BTN_BG, fg=TEXT, activebackground=BTN_HOV,
+        relief='flat', font=('Segoe UI', 12),
+        padx=16, pady=10, cursor='hand2')
+    cancel_btn.pack(side='left', expand=True, fill='x')
+
+    dialog.bind('<Escape>', lambda e: _cancel())
+
+    root.wait_window(dialog)
+    return result_val[0], reason_val[0]
+
+
+# ═══════════════════════════════════════════════════════════
 #  Search Bar helper widget
 # ═══════════════════════════════════════════════════════════
 
@@ -1529,10 +1688,8 @@ class ChessGUI:
 
         all_stats = [None]
         tree_ref  = [None]
-        # sort_state tracks current sort column and direction
         sort_state = {'col': None, 'reverse': False}
 
-        # Column metadata: name -> (stat_dict_key, type)
         COL_META = {
             'Engine':   ('engine',   str),
             'Matches':  ('matches',  int),
@@ -1544,7 +1701,6 @@ class ChessGUI:
         BASE_LABELS = {c: c for c in COL_META}
 
         def _render_rows(stats):
-            """Clear tree and re-insert rows from stats list."""
             tree = tree_ref[0]
             if tree is None:
                 return
@@ -1556,7 +1712,6 @@ class ChessGUI:
                     stat['draws'], stat['loses'], f"{stat['win_rate']:.1f}%"))
 
         def _update_headings():
-            """Redraw all column headings, adding ▲/▼ to the active sort column."""
             tree = tree_ref[0]
             if tree is None:
                 return
@@ -1569,16 +1724,14 @@ class ChessGUI:
                              command=lambda c=col: sort_by_column(c))
 
         def sort_by_column(col):
-            """Sort the stats table by the given column, toggling direction."""
             stats = all_stats[0]
             if not stats:
                 return
-            # Toggle direction if same column clicked again
             if sort_state['col'] == col:
                 sort_state['reverse'] = not sort_state['reverse']
             else:
                 sort_state['col'] = col
-                sort_state['reverse'] = False  # first click = ascending
+                sort_state['reverse'] = False
 
             key_name, key_type = COL_META[col]
             sorted_stats = sorted(
@@ -1594,7 +1747,6 @@ class ChessGUI:
         def refresh_stats(query=''):
             stats = self._get_engine_stats(search_query=query)
             all_stats[0] = stats
-            # Re-apply current sort if one is active
             if sort_state['col']:
                 key_name, _ = COL_META[sort_state['col']]
                 stats = sorted(stats, key=lambda x: x[key_name],
@@ -1618,7 +1770,6 @@ class ChessGUI:
         scrollbar.config(command=tree.yview)
         tree_ref[0] = tree
 
-        # Set up column widths and initial headings (with sort commands)
         tree.column('Engine',   width=260)
         tree.column('Matches',  width=75,  anchor='center')
         tree.column('Win',      width=55,  anchor='center')
@@ -1626,7 +1777,6 @@ class ChessGUI:
         tree.column('Lose',     width=55,  anchor='center')
         tree.column('WinRate%', width=90,  anchor='center')
 
-        # Initial headings — commands assigned here and refreshed by _update_headings
         for col in columns:
             tree.heading(col, text=col, command=lambda c=col: sort_by_column(c))
 
@@ -1662,7 +1812,6 @@ class ChessGUI:
         btn_frame = tk.Frame(stats_window, bg=BG)
         btn_frame.pack(fill='x', padx=20, pady=(0, 12))
 
-        # Quick-sort shortcut buttons
         shortcuts = tk.Frame(btn_frame, bg=BG)
         shortcuts.pack(side='left')
         tk.Label(shortcuts, text="Sort by:", bg=BG, fg="#888",
@@ -2038,6 +2187,7 @@ class ChessGUI:
         update_move_label()
 
     def _parse_pgn_moves(self, pgn):
+        import re
         lines = pgn.split('\n')
         moves_text = []
         in_headers = True
@@ -2051,7 +2201,6 @@ class ChessGUI:
         full_text = ' '.join(moves_text)
         for result in ['1-0', '0-1', '1/2-1/2', '*']:
             full_text = full_text.replace(result, '')
-        import re
         full_text = re.sub(r'\d+\.', '', full_text)
         san_moves = full_text.split()
         temp_board = Board()
@@ -2854,14 +3003,80 @@ class ChessGUI:
         self.game_paused=not self.game_paused
         self._status("⏸ PAUSED" if self.game_paused else "▶ Resuming…")
 
+    # ─── STOP GAME — shows result entry dialog first ──────────────────────────
+
     def _stop_game(self):
-        self.game_running=False; self.game_paused=False
+        """Stop the game, but first ask the user to enter a result."""
+        if not self.game_running:
+            self._status("⏹ No game running.")
+            return
+
+        # Pause engine loop while dialog is open
+        was_paused = self.game_paused
+        self.game_paused = True
+
+        # Determine player names for dialog labels
+        mode = self.play_mode.get()
+        if mode == "human_vs_engine":
+            if self.player_color.get() == "white":
+                white_name = self.player_name.get() or "Player"
+                black_name = self.e2_name.get()
+            else:
+                white_name = self.e2_name.get()
+                black_name = self.player_name.get() or "Player"
+        else:
+            white_name = self.e2_name.get()
+            black_name = self.e1_name.get()
+
+        result, reason = ask_stop_result(self.root, white_name, black_name)
+
+        if result is None:
+            # User cancelled — resume if it wasn't already paused
+            self.game_paused = was_paused
+            return
+
+        # Determine winner name from result
+        winner_name = None
+        if result == "1-0":
+            winner_name = white_name
+        elif result == "0-1":
+            winner_name = black_name
+        # draws / abort: winner_name stays None
+
+        # Actually stop and record
+        self.game_running = False
+        self.game_paused  = False
         self._engine_thinking = False
+
         def _bg():
             try: self._kill_engines()
             except: pass
         threading.Thread(target=_bg, daemon=True).start()
-        self._status("⏹ Game stopped")
+
+        # If there were any moves, save to DB + log
+        if self.board.move_history or result != '*':
+            duration = int(time.time() - self.game_start_time) if hasattr(self, 'game_start_time') else 0
+            pgn = build_pgn(
+                white_name, black_name,
+                self.board.move_history, result,
+                self.game_date or datetime.now().strftime("%Y.%m.%d"),
+                opening_name=self.current_opening_name)
+            self._save_game_to_db(white_name, black_name, result, reason, pgn, duration)
+            self._log_result(f"{result}  —  {reason}")
+
+        if result == '*':
+            self._status("⏹ Game aborted — no result recorded")
+        else:
+            clean_winner = normalize_engine_name(winner_name) if winner_name else None
+            if clean_winner:
+                self._status(f"⏹ Stopped — {clean_winner} wins ({result})")
+            else:
+                self._status(f"⏹ Stopped — {result}  ({reason})")
+
+        # Show game-over dialog (reuse existing one)
+        if result != '*':
+            self.game_result = result
+            self.root.after(100, lambda: self._show_game_over_dialog(result, reason, winner_name))
 
     def _new_game(self):
         self.game_running=False; self.game_paused=False
@@ -2919,7 +3134,7 @@ class ChessGUI:
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.update_idletasks()
-        w = 480; h = 360
+        w = 480; h = 660
         x = (dialog.winfo_screenwidth() // 2) - (w // 2)
         y = (dialog.winfo_screenheight() // 2) - (h // 2)
         dialog.geometry(f'{w}x{h}+{x}+{y}')
