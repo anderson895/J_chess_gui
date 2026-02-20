@@ -49,14 +49,16 @@ QUALITY_COLORS = {
 
 # ── Rank tiers ────────────────────────────────────────────
 RANK_TIERS = [
-    (2800, "👑 Grandmaster",  "#FFD700"),
-    (2600, "💎 Master",       "#00CFFF"),
-    (2400, "🏆 Expert",       "#FF6B35"),
-    (2200, "⚡ Advanced",     "#A0E040"),
-    (2000, "🔥 Intermediate", "#FF8C42"),
-    (1800, "🌟 Developing",   "#C8A2C8"),
-    (1600, "🎯 Beginner",     "#87CEEB"),
-    (   0, "🌱 Novice",       "#90EE90"),
+    (4000, "💀 Immortal", "#FF0000"),                 # top ultra engine
+    (3000, "🌌 Super Grandmaster", "#FF4500"),       # elite engines
+    (2800, "👑 Grandmaster", "#FFD700"),             # normal top engines
+    (2600, "💎 Master", "#00CFFF"),                  # strong engines
+    (2400, "🏆 Expert", "#FF6B35"),                  # above-average engines
+    (2200, "⚡ Advanced", "#A0E040"),                # intermediate-strong
+    (2000, "🔥 Intermediate", "#FF8C42"),            # mid-level
+    (1800, "🤖 Developing", "#C8A2C8"),             # AI/learning engine
+    (1600, "🎯 Beginner", "#87CEEB"),                # beginner engines
+    (0, "🌱 Novice", "#90EE90"),                     # very low-level
 ]
 
 ROOK_D   = [(1,0),(-1,0),(0,1),(0,-1)]
