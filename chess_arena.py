@@ -1802,23 +1802,28 @@ class ChessGUI:
 
             rows.sort(key=lambda x: x['elo'], reverse=True)
 
+            # Assign official rank BEFORE filtering so it never changes
+            for i, row in enumerate(rows, 1):
+                row['rank'] = i
+            total = len(rows)
+
             if query:
                 q = query.lower()
                 rows = [r for r in rows if q in r['engine'].lower() or q in r['tier'].lower()]
 
             all_data_ref[0] = rows
-            _render(rows)
+            _render(rows, total)
 
-        def _render(rows):
+        def _render(rows, total=None):
             tree = tree_ref[0]
             if not tree: return
             for item in tree.get_children():
                 tree.delete(item)
 
-            for rank, row in enumerate(rows, 1):
+            for row in rows:
                 tree.insert('', 'end',
                     values=(
-                        f"#{rank}",
+                        f"#{row['rank']}",
                         row['engine'],
                         row['elo'],
                         row['tier'],
@@ -1832,7 +1837,11 @@ class ChessGUI:
                 )
 
             if count_lbl[0]:
-                count_lbl[0].config(text=f"{len(rows)} engine(s) ranked")
+                shown = len(rows)
+                if total is not None and shown != total:
+                    count_lbl[0].config(text=f"Showing {shown} of {total} engine(s)")
+                else:
+                    count_lbl[0].config(text=f"{shown} engine(s) ranked")
 
         sb_frame, _ = make_search_bar(sb_container, refresh, placeholder="🔍 Filter engines or tiers…")
         sb_frame.pack(fill='x')
@@ -2105,9 +2114,11 @@ class ChessGUI:
             for row in tree.get_children():
                 tree.delete(row)
             for stat in stats:
+                loses = stat['loses']
+                loses_display = f"{loses}" if loses > 0 else str(loses)
                 tree.insert('', 'end', values=(
                     stat['engine'], stat['matches'], stat['wins'],
-                    stat['draws'], stat['loses'], f"{stat['win_rate']:.1f}%"))
+                    stat['draws'], loses_display, f"{stat['win_rate']:.1f}%"))
 
         def _update_headings():
             tree = tree_ref[0]
@@ -2275,8 +2286,24 @@ class ChessGUI:
             for game in games:
                 game_id, white, black, result, reason, date, time_str, moves, duration = game
                 duration_str = f"{duration//60}m {duration%60}s" if duration else "N/A"
+                # Determine row color tag
+                if result == '1/2-1/2':
+                    tag = 'draw'
+                elif result == '1-0':
+                    if norm_filter and normalize_engine_name(black) == norm_filter:
+                        tag = 'loss'
+                    else:
+                        tag = 'white_win'
+                elif result == '0-1':
+                    if norm_filter and normalize_engine_name(white) == norm_filter:
+                        tag = 'loss'
+                    else:
+                        tag = 'black_win'
+                else:
+                    tag = ''
                 tree.insert('', 'end', values=(game_id, date, time_str, white, black,
-                                               result, reason, moves or 0, duration_str))
+                                               result, reason, moves or 0, duration_str),
+                            tags=(tag,))
             if count_lbl2[0]:
                 count_lbl2[0].config(text=f"{len(games)} game(s) shown")
 
@@ -2299,6 +2326,11 @@ class ChessGUI:
             tree.heading(col, text=col)
             anchor = 'center' if col not in ('White','Black','Reason') else 'w'
             tree.column(col, width=w, anchor=anchor)
+
+        tree.tag_configure('white_win', foreground='#FFD700')
+        tree.tag_configure('black_win', foreground='#C8C8C8')
+        tree.tag_configure('draw',      foreground='#00BFFF')
+        tree.tag_configure('loss',      foreground='#FF4444')
         tree.pack(fill='both', expand=True)
 
         count_lbl2[0] = tk.Label(history_window, text="", bg=BG, fg="#555", font=('Segoe UI', 9))
