@@ -47,6 +47,18 @@ QUALITY_COLORS = {
     "Blunder":   "#FF4444",
 }
 
+# ── Rank tiers ────────────────────────────────────────────
+RANK_TIERS = [
+    (2800, "👑 Grandmaster",  "#FFD700"),
+    (2600, "💎 Master",       "#00CFFF"),
+    (2400, "🏆 Expert",       "#FF6B35"),
+    (2200, "⚡ Advanced",     "#A0E040"),
+    (2000, "🔥 Intermediate", "#FF8C42"),
+    (1800, "🌟 Developing",   "#C8A2C8"),
+    (1600, "🎯 Beginner",     "#87CEEB"),
+    (   0, "🌱 Novice",       "#90EE90"),
+]
+
 ROOK_D   = [(1,0),(-1,0),(0,1),(0,-1)]
 BISHOP_D = [(1,1),(1,-1),(-1,1),(-1,-1)]
 QUEEN_D  = ROOK_D + BISHOP_D
@@ -71,6 +83,85 @@ def get_db_path():
     db_dir = os.path.join(home, ".chess_arena")
     os.makedirs(db_dir, exist_ok=True)
     return os.path.join(db_dir, "chess_arena.db")
+
+
+def get_tier(rating):
+    for threshold, label, color in RANK_TIERS:
+        if rating >= threshold:
+            return label, color
+    return "🌱 Novice", "#90EE90"
+
+
+# ── Elo calculation ───────────────────────────────────────
+
+def compute_elo_ratings(games, k=32, start_elo=1500):
+    """
+    Compute Elo ratings for all engines from game history.
+    games: list of (white_engine, black_engine, result) tuples ordered oldest first.
+    Returns dict: {engine_name: final_elo}
+    """
+    ratings = {}
+
+    def get_r(name):
+        return ratings.setdefault(normalize_engine_name(name), start_elo)
+
+    def set_r(name, val):
+        ratings[normalize_engine_name(name)] = val
+
+    for white, black, result in games:
+        w = normalize_engine_name(white)
+        b = normalize_engine_name(black)
+        rw = get_r(w)
+        rb = get_r(b)
+        ew = 1 / (1 + 10 ** ((rb - rw) / 400))
+        eb = 1 - ew
+        if result == '1-0':
+            sw, sb = 1.0, 0.0
+        elif result == '0-1':
+            sw, sb = 0.0, 1.0
+        elif result == '1/2-1/2':
+            sw, sb = 0.5, 0.5
+        else:
+            continue  # skip aborted/no result
+        set_r(w, rw + k * (sw - ew))
+        set_r(b, rb + k * (sb - eb))
+
+    return {n: round(v) for n, v in ratings.items()}
+
+
+def compute_elo_history(games, engine_name, k=32, start_elo=1500):
+    """Return list of (game_index, elo) for a specific engine."""
+    ratings = {}
+    history = []
+    engine_name = normalize_engine_name(engine_name)
+
+    def get_r(name):
+        return ratings.setdefault(normalize_engine_name(name), start_elo)
+
+    def set_r(name, val):
+        ratings[normalize_engine_name(name)] = val
+
+    for i, (white, black, result) in enumerate(games):
+        w = normalize_engine_name(white)
+        b = normalize_engine_name(black)
+        rw = get_r(w)
+        rb = get_r(b)
+        ew = 1 / (1 + 10 ** ((rb - rw) / 400))
+        eb = 1 - ew
+        if result == '1-0':
+            sw, sb = 1.0, 0.0
+        elif result == '0-1':
+            sw, sb = 0.0, 1.0
+        elif result == '1/2-1/2':
+            sw, sb = 0.5, 0.5
+        else:
+            continue
+        set_r(w, rw + k * (sw - ew))
+        set_r(b, rb + k * (sb - eb))
+        if w == engine_name or b == engine_name:
+            history.append((len(history) + 1, round(get_r(engine_name))))
+
+    return history
 
 
 # ── Move quality classification ───────────────────────────
@@ -873,10 +964,6 @@ def ask_promotion(root, color):
 # ═══════════════════════════════════════════════════════════
 
 def ask_stop_result(root, white_name, black_name):
-    """
-    Show a dialog asking the user to record the result before stopping.
-    Returns (result_str, reason_str) or (None, None) if aborted.
-    """
     result_val = [None]
     reason_val = [None]
 
@@ -887,7 +974,6 @@ def ask_stop_result(root, white_name, black_name):
     dialog.transient(root)
     dialog.grab_set()
 
-    # Size to 60% of screen height max, minimum 480px tall
     sw = root.winfo_screenwidth()
     sh = root.winfo_screenheight()
     w  = min(600, sw - 80)
@@ -901,7 +987,6 @@ def ask_stop_result(root, white_name, black_name):
     chosen_result = tk.StringVar(value="")
     chosen_reason = tk.StringVar(value="")
 
-    # ── Header ────────────────────────────────────────────
     hdr = tk.Frame(dialog, bg=BG)
     hdr.pack(fill='x', padx=24, pady=(20, 0))
     tk.Label(hdr, text="⏹  STOP GAME", bg=BG, fg=ACCENT,
@@ -910,7 +995,6 @@ def ask_stop_result(root, white_name, black_name):
     tk.Label(dialog, text="Select the result to record before stopping:",
              bg=BG, fg=TEXT, font=('Segoe UI', 11)).pack(anchor='w', padx=24, pady=(0, 10))
 
-    # ── Result buttons ────────────────────────────────────
     btn_area = tk.Frame(dialog, bg=BG)
     btn_area.pack(fill='x', padx=24)
 
@@ -945,34 +1029,11 @@ def ask_stop_result(root, white_name, black_name):
         _update_reasons(res)
         confirm_btn.config(state='normal')
 
-    # ── Reason dropdown ───────────────────────────────────
     REASON_OPTIONS = {
-        "1-0": [
-            "White wins",
-            "White wins on time",
-            "Black resigned",
-            "Black forfeits",
-            "Illegal move by Black",
-        ],
-        "0-1": [
-            "Black wins",
-            "Black wins on time",
-            "White resigned",
-            "White forfeits",
-            "Illegal move by White",
-        ],
-        "1/2-1/2": [
-            "Draw by agreement",
-            "Stalemate",
-            "Draw by repetition",
-            "Draw by 50-move rule",
-            "Draw by insufficient material",
-        ],
-        "*": [
-            "Game aborted",
-            "No result",
-            "Stopped by user",
-        ],
+        "1-0": ["White wins","White wins on time","Black resigned","Black forfeits","Illegal move by Black"],
+        "0-1": ["Black wins","Black wins on time","White resigned","White forfeits","Illegal move by White"],
+        "1/2-1/2": ["Draw by agreement","Stalemate","Draw by repetition","Draw by 50-move rule","Draw by insufficient material"],
+        "*": ["Game aborted","No result","Stopped by user"],
     }
 
     tk.Label(dialog, text="Reason:", bg=BG, fg="#AAA",
@@ -989,15 +1050,13 @@ def ask_stop_result(root, white_name, black_name):
         reason_combo.config(values=opts, state='readonly')
         chosen_reason.set(opts[0])
 
-    # ── Footer buttons (always at bottom) ────────────────
     foot = tk.Frame(dialog, bg=BG)
     foot.pack(side='bottom', fill='x', padx=24, pady=18)
 
     def _confirm():
         r = chosen_result.get()
         if not r:
-            messagebox.showwarning("No Result", "Please select a result first.",
-                                   parent=dialog)
+            messagebox.showwarning("No Result", "Please select a result first.", parent=dialog)
             return
         reason_text = chosen_reason.get().strip() or "Stopped by user"
         result_val[0] = r
@@ -1022,7 +1081,6 @@ def ask_stop_result(root, white_name, black_name):
     cancel_btn.pack(side='left', expand=True, fill='x')
 
     dialog.bind('<Escape>', lambda e: _cancel())
-
     root.wait_window(dialog)
     return result_val[0], reason_val[0]
 
@@ -1085,7 +1143,7 @@ def make_search_bar(parent, on_search_cb, placeholder="🔍 Search…"):
 
 
 # ═══════════════════════════════════════════════════════════
-#  Loading Screen — blocks UI until openings + analyzer ready
+#  Loading Screen
 # ═══════════════════════════════════════════════════════════
 
 class LoadingScreen:
@@ -1126,8 +1184,7 @@ class LoadingScreen:
         row1.pack(fill='x', pady=(0, 10))
         tk.Label(row1, text="📖  Openings CSV", bg=BG, fg="#AAA",
                  font=('Segoe UI', 10), width=20, anchor='w').pack(side='left')
-        self._open_bar = ttk.Progressbar(row1, maximum=100, length=200,
-                                          mode='indeterminate')
+        self._open_bar = ttk.Progressbar(row1, maximum=100, length=200, mode='indeterminate')
         self._open_bar.pack(side='left', padx=(8, 8))
         self._open_lbl = tk.Label(row1, text="Loading…", bg=BG, fg="#666",
                                    font=('Consolas', 9), width=16, anchor='w')
@@ -1137,8 +1194,7 @@ class LoadingScreen:
         row2.pack(fill='x', pady=(0, 10))
         tk.Label(row2, text="🔍  Analyzer Engine", bg=BG, fg="#AAA",
                  font=('Segoe UI', 10), width=20, anchor='w').pack(side='left')
-        self._anal_bar = ttk.Progressbar(row2, maximum=100, length=200,
-                                          mode='indeterminate')
+        self._anal_bar = ttk.Progressbar(row2, maximum=100, length=200, mode='indeterminate')
         self._anal_bar.pack(side='left', padx=(8, 8))
         self._anal_lbl = tk.Label(row2, text="Loading…", bg=BG, fg="#666",
                                    font=('Consolas', 9), width=16, anchor='w')
@@ -1150,8 +1206,7 @@ class LoadingScreen:
 
         style = ttk.Style()
         style.theme_use('clam')
-        style.configure('TProgressbar', troughcolor=LOG_BG,
-                        background=ACCENT, thickness=14)
+        style.configure('TProgressbar', troughcolor=LOG_BG, background=ACCENT, thickness=14)
 
         self._open_bar.start(12)
         self._anal_bar.start(12)
@@ -1177,10 +1232,8 @@ class LoadingScreen:
                             "stockfish_x86-64.exe", "stockfish"]:
                     anal_candidates.append(os.path.join(base, sub, exe))
 
-        threading.Thread(target=self._load_openings,
-                         args=(csv_candidates,), daemon=True).start()
-        threading.Thread(target=self._load_analyzer,
-                         args=(anal_candidates,), daemon=True).start()
+        threading.Thread(target=self._load_openings, args=(csv_candidates,), daemon=True).start()
+        threading.Thread(target=self._load_analyzer, args=(anal_candidates,), daemon=True).start()
 
     def _load_openings(self, candidates):
         for path in candidates:
@@ -1192,11 +1245,8 @@ class LoadingScreen:
                     n = len(book._entries)
                     self.root.after(0, lambda n=n, p=path: (
                         self._open_bar.stop(),
-                        self._open_lbl.config(
-                            text=f"✓ {n} openings",
-                            fg="#1BECA0"),
-                        self._status_var.set(
-                            f"Openings: {os.path.basename(p)}")
+                        self._open_lbl.config(text=f"✓ {n} openings", fg="#1BECA0"),
+                        self._status_var.set(f"Openings: {os.path.basename(p)}")
                     ))
                     self._openings_done = True
                     self.root.after(0, self._check_done)
@@ -1352,6 +1402,7 @@ class ChessGUI:
             f"DB: {self.db_path} | {book_status} | Ready — load engines and press ▶ Start")
 
         self.root.after(100, self._draw_eval_bar, 0)
+        self.root.after(300, self._refresh_banners)
 
     def _on_closing(self):
         self.game_running = False
@@ -1382,12 +1433,9 @@ class ChessGUI:
         white_h = int(bar_h * ratio)
         black_h = bar_h - white_h
 
-        self.eval_canvas.create_rectangle(0, 0, bar_w, black_h,
-                                           fill="#1A1A1A", outline='')
-        self.eval_canvas.create_rectangle(0, black_h, bar_w, bar_h,
-                                           fill="#F0F0F0", outline='')
-        self.eval_canvas.create_line(0, bar_h//2, bar_w, bar_h//2,
-                                      fill="#444", width=1)
+        self.eval_canvas.create_rectangle(0, 0, bar_w, black_h, fill="#1A1A1A", outline='')
+        self.eval_canvas.create_rectangle(0, black_h, bar_w, bar_h, fill="#F0F0F0", outline='')
+        self.eval_canvas.create_line(0, bar_h//2, bar_w, bar_h//2, fill="#444", width=1)
         if abs(cp_val) >= 29000:
             txt = "M" if cp_val > 0 else "-M"
         else:
@@ -1398,11 +1446,9 @@ class ChessGUI:
         else:
             ty = min(black_h + 10, bar_h - 8)
             fg = "#222"
-        self.eval_canvas.create_text(bar_w//2, ty, text=txt,
-                                      font=('Consolas', 7, 'bold'),
+        self.eval_canvas.create_text(bar_w//2, ty, text=txt, font=('Consolas', 7, 'bold'),
                                       fill=fg, anchor='center')
-        self.eval_canvas.create_rectangle(0, 0, bar_w-1, bar_h-1,
-                                           outline="#555", width=1)
+        self.eval_canvas.create_rectangle(0, 0, bar_w-1, bar_h-1, outline="#555", width=1)
 
     def _update_eval_from_engine(self, engine, side):
         if not engine: return
@@ -1455,7 +1501,6 @@ class ChessGUI:
         self.quality_lbl.config(text=quality, fg=color, bg=BG)
 
     def _annotate_last_move(self, quality):
-        """No-op: move quality badges removed from game log."""
         pass
 
     def _trigger_quality_analysis(self, moves_before, moves_after, was_white, san):
@@ -1632,6 +1677,20 @@ class ChessGUI:
             print(f"Database error: {e}")
             return []
 
+    def _get_all_games_for_elo(self):
+        """Get all games ordered oldest-first for Elo computation."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT white_engine, black_engine, result FROM games ORDER BY id ASC")
+            rows = cursor.fetchall()
+            conn.close()
+            return rows
+        except Exception as e:
+            print(f"Database error (elo): {e}")
+            return []
+
     def _get_all_games(self, filter_engine=None, search_query=''):
         try:
             conn = sqlite3.connect(self.db_path)
@@ -1669,6 +1728,346 @@ class ChessGUI:
         except Exception as e:
             print(f"Database error: {e}")
             return None
+
+    # ═══════════════════════════════════════════════════════════
+    #  RANKINGS WINDOW  ← NEW
+    # ═══════════════════════════════════════════════════════════
+
+    def _show_rankings(self):
+        """Show the Engine Rankings leaderboard with Elo ratings."""
+        win = tk.Toplevel(self.root)
+        win.title("🏆 Engine Rankings")
+        win.configure(bg=BG)
+        win.geometry("860x680")
+        win.resizable(True, True)
+
+        # ── Header ────────────────────────────────────────────
+        hdr_frame = tk.Frame(win, bg=BG)
+        hdr_frame.pack(fill='x', padx=20, pady=(14, 0))
+
+        tk.Label(hdr_frame, text="🏆", bg=BG, fg=ACCENT,
+                 font=('Segoe UI', 28)).pack(side='left', padx=(0, 10))
+        title_f = tk.Frame(hdr_frame, bg=BG)
+        title_f.pack(side='left')
+        tk.Label(title_f, text="ENGINE RANKINGS", bg=BG, fg=ACCENT,
+                 font=('Segoe UI', 18, 'bold')).pack(anchor='w')
+        tk.Label(title_f, text="Elo ratings calculated from all recorded games",
+                 bg=BG, fg="#666", font=('Segoe UI', 9)).pack(anchor='w')
+
+        tk.Frame(win, bg=ACCENT, height=2).pack(fill='x', padx=20, pady=(10, 8))
+
+        # ── Tier legend ───────────────────────────────────────
+        legend_frame = tk.Frame(win, bg=PANEL_BG)
+        legend_frame.pack(fill='x', padx=20, pady=(0, 8))
+        tk.Label(legend_frame, text="  Tiers: ", bg=PANEL_BG, fg="#AAA",
+                 font=('Segoe UI', 8)).pack(side='left')
+        for threshold, label, color in RANK_TIERS:
+            tk.Label(legend_frame, text=f"  {label} ≥{threshold}" if threshold > 0 else f"  {label}",
+                     bg=PANEL_BG, fg=color, font=('Segoe UI', 8)).pack(side='left')
+
+        # ── Search bar ────────────────────────────────────────
+        sb_container = tk.Frame(win, bg=BG)
+        sb_container.pack(fill='x', padx=20, pady=(0, 6))
+
+        all_data_ref = [None]
+        tree_ref     = [None]
+        count_lbl    = [None]
+
+        def refresh(query=''):
+            games_raw = self._get_all_games_for_elo()
+            elo_ratings = compute_elo_ratings(games_raw)
+            stats_list  = self._get_engine_stats()
+            stats_map   = {s['engine']: s for s in stats_list}
+
+            rows = []
+            for engine, elo in elo_ratings.items():
+                s = stats_map.get(engine, {})
+                matches  = s.get('matches', 0)
+                wins     = s.get('wins', 0)
+                draws    = s.get('draws', 0)
+                loses    = s.get('loses', 0)
+                win_rate = s.get('win_rate', 0.0)
+                tier_lbl, tier_col = get_tier(elo)
+                rows.append({
+                    'engine':   engine,
+                    'elo':      elo,
+                    'tier':     tier_lbl,
+                    'tier_col': tier_col,
+                    'matches':  matches,
+                    'wins':     wins,
+                    'draws':    draws,
+                    'loses':    loses,
+                    'win_rate': win_rate,
+                })
+
+            rows.sort(key=lambda x: x['elo'], reverse=True)
+
+            if query:
+                q = query.lower()
+                rows = [r for r in rows if q in r['engine'].lower() or q in r['tier'].lower()]
+
+            all_data_ref[0] = rows
+            _render(rows)
+
+        def _render(rows):
+            tree = tree_ref[0]
+            if not tree: return
+            for item in tree.get_children():
+                tree.delete(item)
+
+            for rank, row in enumerate(rows, 1):
+                medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"#{rank}")
+                tree.insert('', 'end',
+                    values=(
+                        medal,
+                        row['engine'],
+                        row['elo'],
+                        row['tier'],
+                        row['matches'],
+                        row['wins'],
+                        row['draws'],
+                        row['loses'],
+                        f"{row['win_rate']:.1f}%",
+                    ),
+                    tags=(row['tier_col'],)
+                )
+
+            if count_lbl[0]:
+                count_lbl[0].config(text=f"{len(rows)} engine(s) ranked")
+
+        sb_frame, _ = make_search_bar(sb_container, refresh, placeholder="🔍 Filter engines or tiers…")
+        sb_frame.pack(fill='x')
+
+        # ── Treeview ──────────────────────────────────────────
+        tree_frame = tk.Frame(win, bg=BG)
+        tree_frame.pack(fill='both', expand=True, padx=20, pady=(0, 4))
+
+        scrollbar = tk.Scrollbar(tree_frame)
+        scrollbar.pack(side='right', fill='y')
+
+        columns = ('Rank', 'Engine', 'Elo', 'Tier', 'Games', 'W', 'D', 'L', 'WR%')
+        tree = ttk.Treeview(tree_frame, columns=columns, show='headings',
+                            yscrollcommand=scrollbar.set)
+        scrollbar.config(command=tree.yview)
+        tree_ref[0] = tree
+
+        col_cfg = [
+            ('Rank',   55,  'center'),
+            ('Engine', 230, 'w'),
+            ('Elo',    70,  'center'),
+            ('Tier',   140, 'w'),
+            ('Games',  55,  'center'),
+            ('W',      45,  'center'),
+            ('D',      45,  'center'),
+            ('L',      45,  'center'),
+            ('WR%',    65,  'center'),
+        ]
+        for col, w, anch in col_cfg:
+            tree.column(col, width=w, anchor=anch)
+            tree.heading(col, text=col)
+
+        # Color rows by tier
+        for _, label, color in RANK_TIERS:
+            tree.tag_configure(color, foreground=color)
+
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure('Treeview', background=LOG_BG, foreground=TEXT,
+                        fieldbackground=LOG_BG, borderwidth=0, rowheight=28)
+        style.configure('Treeview.Heading', background=BTN_BG, foreground=TEXT,
+                        borderwidth=1, font=('Segoe UI', 9, 'bold'))
+        style.map('Treeview', background=[('selected', ACCENT)])
+        style.map('Treeview.Heading', background=[('active', ACCENT)])
+        tree.pack(fill='both', expand=True)
+
+        count_lbl[0] = tk.Label(win, text="", bg=BG, fg="#555", font=('Segoe UI', 9))
+        count_lbl[0].pack(pady=(2, 0))
+
+        tk.Label(win,
+                 text="💡 Double-click a row to see Elo history  ·  Elo starts at 1500, K=32",
+                 bg=BG, fg="#444", font=('Segoe UI', 8)).pack(pady=(0, 4))
+
+        def on_double_click(event):
+            sel = tree.selection()
+            if not sel: return
+            item = tree.item(sel[0])
+            vals = item['values']
+            engine_name = vals[1]
+            self._show_elo_history(engine_name)
+
+        tree.bind('<Double-1>', on_double_click)
+
+        # ── Footer buttons ────────────────────────────────────
+        btn_frame = tk.Frame(win, bg=BG)
+        btn_frame.pack(fill='x', padx=20, pady=(0, 14))
+
+        tk.Button(btn_frame, text="🔄 Refresh", command=lambda: refresh(''),
+                  bg=BTN_BG, fg=TEXT, font=('Segoe UI', 10),
+                  padx=15, pady=8, cursor='hand2', relief='flat').pack(side='left', padx=5)
+        tk.Button(btn_frame, text="📊 Statistics",
+                  command=self._show_statistics,
+                  bg=BTN_BG, fg=TEXT, font=('Segoe UI', 10),
+                  padx=15, pady=8, cursor='hand2', relief='flat').pack(side='left', padx=5)
+        tk.Button(btn_frame, text="✕ Close", command=win.destroy,
+                  bg=BTN_BG, fg=TEXT, font=('Segoe UI', 10),
+                  padx=15, pady=8, cursor='hand2', relief='flat').pack(side='right', padx=5)
+
+        refresh('')
+
+    # ─── Elo history chart ────────────────────────────────────────────────────
+
+    def _show_elo_history(self, engine_name):
+        """Draw a simple Elo rating history for one engine."""
+        games_raw = self._get_all_games_for_elo()
+        history = compute_elo_history(games_raw, engine_name)
+
+        if not history:
+            messagebox.showinfo("No Data", f"No games found for:\n{engine_name}")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title(f"📈 Elo History — {engine_name}")
+        win.configure(bg=BG)
+        win.geometry("700x500")
+        win.resizable(True, True)
+
+        tk.Label(win, text=f"📈 Elo History: {engine_name}",
+                 bg=BG, fg=ACCENT, font=('Segoe UI', 14, 'bold')).pack(pady=(14, 4))
+
+        final_elo = history[-1][1]
+        tier_lbl, tier_col = get_tier(final_elo)
+        tk.Label(win, text=f"Current Rating: {final_elo}  ·  {tier_lbl}",
+                 bg=BG, fg=tier_col, font=('Segoe UI', 11, 'bold')).pack(pady=(0, 8))
+
+        tk.Frame(win, bg=ACCENT, height=2).pack(fill='x', padx=20)
+
+        # ── Canvas chart ──────────────────────────────────────
+        chart_frame = tk.Frame(win, bg=BG)
+        chart_frame.pack(fill='both', expand=True, padx=20, pady=12)
+
+        canvas = tk.Canvas(chart_frame, bg=LOG_BG, highlightthickness=1,
+                           highlightbackground='#333')
+        canvas.pack(fill='both', expand=True)
+
+        def draw_chart(event=None):
+            canvas.delete('all')
+            cw = canvas.winfo_width()  or 660
+            ch = canvas.winfo_height() or 360
+
+            pad_l, pad_r, pad_t, pad_b = 60, 20, 20, 40
+            plot_w = cw - pad_l - pad_r
+            plot_h = ch - pad_t - pad_b
+
+            elos = [h[1] for h in history]
+            min_elo = max(0, min(elos) - 50)
+            max_elo = max(elos) + 50
+            elo_range = max_elo - min_elo or 1
+            n = len(history)
+
+            # Background grid
+            for i in range(5):
+                gy = pad_t + int(plot_h * i / 4)
+                canvas.create_line(pad_l, gy, pad_l + plot_w, gy,
+                                   fill="#222", dash=(4, 4))
+                ev = max_elo - int(elo_range * i / 4)
+                canvas.create_text(pad_l - 6, gy, text=str(ev),
+                                   fill="#666", font=('Consolas', 8), anchor='e')
+
+            # Y-axis label
+            canvas.create_text(12, ch // 2, text="Elo", fill="#666",
+                               font=('Consolas', 8), angle=90)
+
+            # Plot Elo line with tier-colored segments
+            def elo_y(e):
+                return pad_t + int(plot_h * (1 - (e - min_elo) / elo_range))
+
+            def game_x(i):
+                if n == 1:
+                    return pad_l + plot_w // 2
+                return pad_l + int(plot_w * i / (n - 1))
+
+            # Draw tier zone backgrounds
+            for k, (threshold, _, color) in enumerate(RANK_TIERS):
+                next_thresh = RANK_TIERS[k - 1][0] if k > 0 else 9999
+                y1 = pad_t
+                y2 = pad_t + plot_h
+                if next_thresh > max_elo:
+                    y1_clipped = pad_t
+                else:
+                    y1_clipped = elo_y(min(next_thresh, max_elo))
+                if threshold < min_elo:
+                    y2_clipped = pad_t + plot_h
+                else:
+                    y2_clipped = elo_y(max(threshold, min_elo))
+                if y1_clipped < y2_clipped:
+                    canvas.create_rectangle(pad_l, y1_clipped, pad_l + plot_w, y2_clipped,
+                                           fill=color, stipple='gray12', outline='')
+
+            # Draw the line
+            points = [(game_x(i), elo_y(e)) for i, (_, e) in enumerate(history)]
+            if len(points) > 1:
+                for i in range(len(points) - 1):
+                    e1 = history[i][1]
+                    e2 = history[i + 1][1]
+                    mid_e = (e1 + e2) / 2
+                    _, seg_col = get_tier(int(mid_e))
+                    canvas.create_line(points[i][0], points[i][1],
+                                      points[i+1][0], points[i+1][1],
+                                      fill=seg_col, width=2, smooth=True)
+
+            # Draw data points
+            for i, (gn, e) in enumerate(history):
+                x, y = game_x(i), elo_y(e)
+                _, pt_col = get_tier(e)
+                canvas.create_oval(x - 4, y - 4, x + 4, y + 4,
+                                  fill=pt_col, outline='white', width=1)
+
+            # X-axis labels
+            step = max(1, n // 8)
+            for i in range(0, n, step):
+                x = game_x(i)
+                canvas.create_text(x, ch - pad_b + 12, text=str(history[i][0]),
+                                  fill="#555", font=('Consolas', 8))
+            canvas.create_text(pad_l + plot_w // 2, ch - 8,
+                               text="Game #", fill="#555", font=('Consolas', 8))
+
+            # Starting / ending rating annotation
+            if history:
+                canvas.create_text(game_x(0), elo_y(history[0][1]) - 12,
+                                  text=str(history[0][1]), fill="#AAA",
+                                  font=('Consolas', 8))
+                canvas.create_text(game_x(n - 1), elo_y(history[-1][1]) - 12,
+                                  text=str(history[-1][1]), fill=tier_col,
+                                  font=('Consolas', 9, 'bold'))
+
+        canvas.bind('<Configure>', draw_chart)
+        win.after(100, draw_chart)
+
+        # Stats summary row
+        if len(elos) > 1:
+            peak = max(elos)
+            lowest = min(elos)
+            change = elos[-1] - elos[0]
+            chg_str = f"+{change}" if change >= 0 else str(change)
+            chg_col = "#00FF80" if change >= 0 else "#FF4444"
+            summary_f = tk.Frame(win, bg=PANEL_BG)
+            summary_f.pack(fill='x', padx=20, pady=(0, 4))
+            for label, val, col in [
+                ("Peak", str(peak), "#FFD700"),
+                ("Lowest", str(lowest), "#FF6B6B"),
+                ("Change", chg_str, chg_col),
+                ("Games", str(n), TEXT),
+            ]:
+                sf = tk.Frame(summary_f, bg=PANEL_BG)
+                sf.pack(side='left', expand=True)
+                tk.Label(sf, text=label, bg=PANEL_BG, fg="#666",
+                         font=('Segoe UI', 8)).pack()
+                tk.Label(sf, text=val, bg=PANEL_BG, fg=col,
+                         font=('Segoe UI', 12, 'bold')).pack()
+
+        tk.Button(win, text="✕ Close", command=win.destroy,
+                  bg=BTN_BG, fg=TEXT, font=('Segoe UI', 10),
+                  padx=20, pady=8, cursor='hand2', relief='flat').pack(pady=(0, 12))
 
     # ─── Statistics window ────────────────────────────────────────────────────
 
@@ -1720,8 +2119,7 @@ class ChessGUI:
                 label = BASE_LABELS[col]
                 if col == sort_state['col']:
                     label += ' \u25bc' if sort_state['reverse'] else ' \u25b2'
-                tree.heading(col, text=label,
-                             command=lambda c=col: sort_by_column(c))
+                tree.heading(col, text=label, command=lambda c=col: sort_by_column(c))
 
         def sort_by_column(col):
             stats = all_stats[0]
@@ -1816,17 +2214,20 @@ class ChessGUI:
         shortcuts.pack(side='left')
         tk.Label(shortcuts, text="Sort by:", bg=BG, fg="#888",
                  font=('Segoe UI', 8)).pack(side='left', padx=(0, 4))
-        for label, col in [("Matches", "Matches"), ("Wins", "Win"),
-                           ("Win%", "WinRate%")]:
+        for label, col in [("Matches", "Matches"), ("Wins", "Win"), ("Win%", "WinRate%")]:
             tk.Button(shortcuts, text=label,
                       command=lambda c=col: sort_by_column(c),
                       bg=BTN_BG, fg=TEXT, font=('Segoe UI', 8),
                       padx=8, pady=4, cursor='hand2', relief='flat').pack(side='left', padx=2)
 
+        tk.Button(btn_frame, text="🏆 Rankings",
+                  command=self._show_rankings,
+                  bg=ACCENT, fg=TEXT, font=('Segoe UI', 10, 'bold'),
+                  padx=15, pady=8, cursor='hand2', relief='flat').pack(side='left', padx=(10, 5))
         tk.Button(btn_frame, text="View All Game History",
                   command=lambda: self._show_game_history(),
                   bg=BTN_BG, fg=TEXT, font=('Segoe UI', 10),
-                  padx=15, pady=8, cursor='hand2').pack(side='left', padx=(10, 5))
+                  padx=15, pady=8, cursor='hand2').pack(side='left', padx=5)
         tk.Button(btn_frame, text="Refresh",
                   command=lambda: refresh_stats(''),
                   bg=BTN_BG, fg=TEXT, font=('Segoe UI', 10),
@@ -2303,12 +2704,13 @@ class ChessGUI:
             tk.Spinbox(rf,**kw).pack(side='right')
         tk.Frame(p,bg='#2a2a4a',height=1).pack(fill='x',padx=10,pady=6)
         for txt,cmd,acc in [
-            ("▶  START GAME",     self._start_game,  True),
-            ("⏸  PAUSE / RESUME", self._toggle_pause,False),
-            ("⏹  STOP GAME",      self._stop_game,   False),
-            ("↺  NEW GAME",       self._new_game,    False),
-            ("⇅  FLIP BOARD",     self._flip_board,  False),
-            ("💾  EXPORT PGN",    self._export_pgn,  False),
+            ("▶  START GAME",     self._start_game,   True),
+            ("⏸  PAUSE / RESUME", self._toggle_pause, False),
+            ("⏹  STOP GAME",      self._stop_game,    False),
+            ("↺  NEW GAME",       self._new_game,     False),
+            ("⇅  FLIP BOARD",     self._flip_board,   False),
+            ("💾  EXPORT PGN",    self._export_pgn,   False),
+            ("🏆  RANKINGS",      self._show_rankings,False),   # ← NEW
             ("📊  STATISTICS",    self._show_statistics, False),
         ]:
             self._btn(p,txt,cmd,accent=acc).pack(fill='x',padx=10,pady=2)
@@ -2407,11 +2809,18 @@ class ChessGUI:
             highlightthickness=1, highlightbackground="#003366", height=1)
         self.opening_lbl.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(0, 3))
 
-        self.black_banner = tk.Label(p, textvariable=self.e1_name,
-            bg="#1a1a2a", fg="#C8C8C8", font=('Segoe UI', 11, 'bold'),
-            anchor='center', pady=6, relief='flat',
+        # ── Black player banner (frame with name + rank labels) ──────────────
+        self.black_banner = tk.Frame(p, bg="#1a1a2a",
             highlightthickness=1, highlightbackground="#444444")
         self.black_banner.grid(row=2, column=0, columnspan=2, sticky='ew', pady=(0, 3))
+        self._black_name_lbl = tk.Label(self.black_banner, textvariable=self.e1_name,
+            bg="#1a1a2a", fg="#C8C8C8", font=('Segoe UI', 11, 'bold'),
+            anchor='center', pady=6)
+        self._black_name_lbl.pack(side='left', expand=True)
+        self._black_rank_lbl = tk.Label(self.black_banner, text="",
+            bg="#1a1a2a", fg="#C8C8C8", font=('Segoe UI', 9),
+            anchor='e', padx=8)
+        self._black_rank_lbl.pack(side='right')
 
         board_row = tk.Frame(p, bg=BG)
         board_row.grid(row=3, column=0, columnspan=2)
@@ -2464,11 +2873,18 @@ class ChessGUI:
             l.pack(side='left', ipadx=sz//2-8)
             self.file_labels.append(l)
 
-        self.white_banner = tk.Label(p, textvariable=self.e2_name,
-            bg="#1c2a1c", fg="#FFD700", font=('Segoe UI', 11, 'bold'),
-            anchor='center', pady=6, relief='flat',
+        # ── White player banner (frame with name + rank labels) ──────────────
+        self.white_banner = tk.Frame(p, bg="#1c2a1c",
             highlightthickness=1, highlightbackground="#555500")
         self.white_banner.grid(row=4, column=0, columnspan=2, sticky='ew', pady=(3, 0))
+        self._white_name_lbl = tk.Label(self.white_banner, textvariable=self.e2_name,
+            bg="#1c2a1c", fg="#FFD700", font=('Segoe UI', 11, 'bold'),
+            anchor='center', pady=6)
+        self._white_name_lbl.pack(side='left', expand=True)
+        self._white_rank_lbl = tk.Label(self.white_banner, text="",
+            bg="#1c2a1c", fg="#FFD700", font=('Segoe UI', 9),
+            anchor='e', padx=8)
+        self._white_rank_lbl.pack(side='right')
 
         self.check_lbl = tk.Label(p, text="", bg=BG, fg=CHECK_SQ,
                                    font=('Segoe UI', 10, 'bold'), anchor='center')
@@ -2673,6 +3089,7 @@ class ChessGUI:
         self._draw_board()
         self._update_info()
         self._refresh_opening()
+        self.root.after(0, self._refresh_banners)
 
         self._trigger_quality_analysis(moves_before, moves_after, was_white, san)
 
@@ -2699,10 +3116,63 @@ class ChessGUI:
     def _update_banners(self):
         if self.board.turn=='b':
             self.black_banner.config(bg="#252538", highlightbackground=ACCENT, highlightthickness=2)
+            self._black_name_lbl.config(bg="#252538")
+            self._black_rank_lbl.config(bg="#252538")
             self.white_banner.config(bg="#1c2a1c", highlightbackground="#555500", highlightthickness=1)
+            self._white_name_lbl.config(bg="#1c2a1c")
+            self._white_rank_lbl.config(bg="#1c2a1c")
         else:
             self.white_banner.config(bg="#2a2a1a", highlightbackground=ACCENT, highlightthickness=2)
+            self._white_name_lbl.config(bg="#2a2a1a")
+            self._white_rank_lbl.config(bg="#2a2a1a")
             self.black_banner.config(bg="#1a1a2a", highlightbackground="#444444", highlightthickness=1)
+            self._black_name_lbl.config(bg="#1a1a2a")
+            self._black_rank_lbl.config(bg="#1a1a2a")
+
+    def _refresh_banners(self):
+        """Fetch current Elo for both players and update rank labels on banners."""
+        try:
+            games_raw = self._get_all_games_for_elo()
+            elo_ratings = compute_elo_ratings(games_raw)
+
+            mode = self.play_mode.get()
+
+            # Determine the actual engine names (strip color suffix for lookup)
+            if mode == "human_vs_engine":
+                if self.player_color.get() == "white":
+                    white_raw = self.player_name.get()
+                    black_raw = self.e2_name.get()
+                else:
+                    white_raw = self.e2_name.get()
+                    black_raw = self.player_name.get()
+            else:
+                black_raw = self.e1_name.get()
+                white_raw = self.e2_name.get()
+
+            black_key = normalize_engine_name(black_raw)
+            white_key = normalize_engine_name(white_raw)
+
+            b_elo = elo_ratings.get(black_key)
+            w_elo = elo_ratings.get(white_key)
+
+            if b_elo is not None:
+                tier_lbl, tier_col = get_tier(b_elo)
+                self._black_rank_lbl.config(
+                    text=f"{tier_lbl}  •  {b_elo} Elo",
+                    fg=tier_col)
+            else:
+                self._black_rank_lbl.config(text="Unranked", fg="#555")
+
+            if w_elo is not None:
+                tier_lbl, tier_col = get_tier(w_elo)
+                self._white_rank_lbl.config(
+                    text=f"{tier_lbl}  •  {w_elo} Elo",
+                    fg=tier_col)
+            else:
+                self._white_rank_lbl.config(text="Unranked", fg="#555")
+
+        except Exception as e:
+            print(f"[_refresh_banners] {e}")
 
     # ─── Logging helpers ──────────────────────────────────────────────────────
 
@@ -2900,6 +3370,7 @@ class ChessGUI:
         self.root.after(0, self._draw_board)
         self.root.after(0, self._update_info)
         self.root.after(0, self._refresh_opening)
+        self.root.after(0, self._refresh_banners)
 
         self._trigger_quality_analysis(moves_before, moves_after, was_white_moving, san)
 
@@ -2966,6 +3437,7 @@ class ChessGUI:
         self._eval_bar_cp = 0
         self._reset_opening()
         self._draw_board(); self._update_info()
+        self.root.after(200, self._refresh_banners)
         self.root.after(100, self._draw_eval_bar, 0)
         if hasattr(self, 'quality_lbl'):
             self.quality_lbl.config(text="")
@@ -3003,19 +3475,14 @@ class ChessGUI:
         self.game_paused=not self.game_paused
         self._status("⏸ PAUSED" if self.game_paused else "▶ Resuming…")
 
-    # ─── STOP GAME — shows result entry dialog first ──────────────────────────
-
     def _stop_game(self):
-        """Stop the game, but first ask the user to enter a result."""
         if not self.game_running:
             self._status("⏹ No game running.")
             return
 
-        # Pause engine loop while dialog is open
         was_paused = self.game_paused
         self.game_paused = True
 
-        # Determine player names for dialog labels
         mode = self.play_mode.get()
         if mode == "human_vs_engine":
             if self.player_color.get() == "white":
@@ -3031,19 +3498,15 @@ class ChessGUI:
         result, reason = ask_stop_result(self.root, white_name, black_name)
 
         if result is None:
-            # User cancelled — resume if it wasn't already paused
             self.game_paused = was_paused
             return
 
-        # Determine winner name from result
         winner_name = None
         if result == "1-0":
             winner_name = white_name
         elif result == "0-1":
             winner_name = black_name
-        # draws / abort: winner_name stays None
 
-        # Actually stop and record
         self.game_running = False
         self.game_paused  = False
         self._engine_thinking = False
@@ -3053,7 +3516,6 @@ class ChessGUI:
             except: pass
         threading.Thread(target=_bg, daemon=True).start()
 
-        # If there were any moves, save to DB + log
         if self.board.move_history or result != '*':
             duration = int(time.time() - self.game_start_time) if hasattr(self, 'game_start_time') else 0
             pgn = build_pgn(
@@ -3073,7 +3535,6 @@ class ChessGUI:
             else:
                 self._status(f"⏹ Stopped — {result}  ({reason})")
 
-        # Show game-over dialog (reuse existing one)
         if result != '*':
             self.game_result = result
             self.root.after(100, lambda: self._show_game_over_dialog(result, reason, winner_name))
@@ -3150,8 +3611,16 @@ class ChessGUI:
                  font=('Segoe UI', 24, 'bold')).pack()
         if winner_name:
             clean_name = normalize_engine_name(winner_name)
+            # Show Elo after win
+            games_raw = self._get_all_games_for_elo()
+            elo_ratings = compute_elo_ratings(games_raw)
+            winner_elo = elo_ratings.get(clean_name)
+            tier_lbl, tier_col = get_tier(winner_elo) if winner_elo else ("", TEXT)
             tk.Label(main_frame, text=clean_name, bg=BG, fg=TEXT,
                      font=('Segoe UI', 20, 'bold')).pack(pady=5)
+            if winner_elo:
+                tk.Label(main_frame, text=f"Elo: {winner_elo}  ·  {tier_lbl}",
+                         bg=BG, fg=tier_col, font=('Segoe UI', 11)).pack(pady=2)
         tk.Frame(main_frame, bg=ACCENT, height=2).pack(fill='x', pady=10)
         tk.Label(main_frame, text=f"Result: {result}", bg=BG, fg="#AAA",
                  font=('Segoe UI', 12)).pack(pady=2)
@@ -3180,17 +3649,19 @@ class ChessGUI:
         def close_dialog(): dialog.destroy()
         def new_game_and_close(): dialog.destroy(); self._new_game()
         def export_and_close(): dialog.destroy(); self._export_pgn()
+        def rankings_and_close(): dialog.destroy(); self._show_rankings()
         for text, cmd, accent in [
-            ("New Game", new_game_and_close, True),
-            ("Export PGN", export_and_close, False),
-            ("Close", close_dialog, False)
+            ("New Game",  new_game_and_close,  True),
+            ("🏆 Rankings", rankings_and_close, False),
+            ("Export PGN", export_and_close,   False),
+            ("Close",      close_dialog,        False)
         ]:
             bg_color = ACCENT if accent else BTN_BG
             btn = tk.Button(btn_frame, text=text, command=cmd, bg=bg_color, fg=TEXT,
                             activebackground=BTN_HOV, activeforeground='white',
-                            relief='flat', font=('Segoe UI', 11, 'bold' if accent else 'normal'),
-                            padx=20, pady=10, cursor='hand2', borderwidth=0)
-            btn.pack(side='left', expand=True, fill='x', padx=5)
+                            relief='flat', font=('Segoe UI', 10, 'bold' if accent else 'normal'),
+                            padx=14, pady=10, cursor='hand2', borderwidth=0)
+            btn.pack(side='left', expand=True, fill='x', padx=4)
             btn.bind('<Enter>', lambda e, b=btn, bg=bg_color: b.config(bg=BTN_HOV))
             btn.bind('<Leave>', lambda e, b=btn, bg=bg_color: b.config(bg=bg_color))
         dialog.bind('<Escape>', lambda e: close_dialog())
@@ -3253,6 +3724,7 @@ class ChessGUI:
             self.root.after(0,self._draw_board)
             self.root.after(0,self._update_info)
             self.root.after(0,self._refresh_opening)
+            self.root.after(0,self._refresh_banners)
 
             self._trigger_quality_analysis(moves_before, moves_after, was_white_moving, san)
 
@@ -3297,6 +3769,7 @@ class ChessGUI:
             status_msg = f"🏁 {result} — {reason}"
         self.root.after(0, self._status, status_msg)
         self.root.after(0, self._log_result, f"{result}  —  {reason}")
+        self.root.after(150, self._refresh_banners)
         self.root.after(0, lambda: self._show_game_over_dialog(result, reason, winner_name))
 
 
