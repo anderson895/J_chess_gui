@@ -3130,14 +3130,18 @@ class ChessGUI:
             self._black_rank_lbl.config(bg="#1a1a2a")
 
     def _refresh_banners(self):
-        """Fetch current Elo for both players and update rank labels on banners."""
+        """Fetch current Elo + rank number for both players and update banners."""
         try:
             games_raw = self._get_all_games_for_elo()
             elo_ratings = compute_elo_ratings(games_raw)
 
+            # Build sorted leaderboard for rank numbers
+            sorted_engines = sorted(elo_ratings.items(), key=lambda x: x[1], reverse=True)
+            rank_map = {name: i + 1 for i, (name, _) in enumerate(sorted_engines)}
+            total = len(sorted_engines)
+
             mode = self.play_mode.get()
 
-            # Determine the actual engine names (strip color suffix for lookup)
             if mode == "human_vs_engine":
                 if self.player_color.get() == "white":
                     white_raw = self.player_name.get()
@@ -3157,16 +3161,18 @@ class ChessGUI:
 
             if b_elo is not None:
                 tier_lbl, tier_col = get_tier(b_elo)
+                b_rank = rank_map.get(black_key, "?")
                 self._black_rank_lbl.config(
-                    text=f"{tier_lbl}  •  {b_elo} Elo",
+                    text=f"#{b_rank}/{total}  {tier_lbl}  •  {b_elo} Elo",
                     fg=tier_col)
             else:
                 self._black_rank_lbl.config(text="Unranked", fg="#555")
 
             if w_elo is not None:
                 tier_lbl, tier_col = get_tier(w_elo)
+                w_rank = rank_map.get(white_key, "?")
                 self._white_rank_lbl.config(
-                    text=f"{tier_lbl}  •  {w_elo} Elo",
+                    text=f"#{w_rank}/{total}  {tier_lbl}  •  {w_elo} Elo",
                     fg=tier_col)
             else:
                 self._white_rank_lbl.config(text="Unranked", fg="#555")
