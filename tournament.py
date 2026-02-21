@@ -20,6 +20,7 @@ try:
     from board import Board
     from engine import UCIEngine, AnalyzerEngine
     from elo import compute_elo_ratings
+    from database import Database
 except ImportError:
     try:
         from __main__ import (BG, PANEL_BG, ACCENT, TEXT, BTN_BG, BTN_HOV,
@@ -32,6 +33,10 @@ except ImportError:
             from __main__ import AnalyzerEngine
         except ImportError:
             AnalyzerEngine = None
+        try:
+            from database import Database
+        except ImportError:
+            Database = None
     except ImportError:
         BG       = "#1A1A2E"; PANEL_BG = "#16213E"; ACCENT   = "#E94560"
         TEXT     = "#EAEAEA"; BTN_BG   = "#0F3460"; BTN_HOV  = "#E94560"
@@ -39,6 +44,7 @@ except ImportError:
         LIGHT_SQ = "#F0D9B5"; DARK_SQ  = "#B58863"
         LAST_FROM= "#CDD26A"; LAST_TO  = "#AAB44F"; CHECK_SQ = "#FF4444"
         AnalyzerEngine = None
+        Database = None
         UNICODE  = {
             'K':'♔','Q':'♕','R':'♖','B':'♗','N':'♘','P':'♙',
             'k':'♚','q':'♛','r':'♜','b':'♝','n':'♞','p':'♟',
@@ -238,7 +244,8 @@ class KnockoutBracket:
     def seed_bracket(players):
         n = len(players)
         size = 1
-        while size < n: size *= 2
+        while size < n:
+            size *= 2
         seeded = list(players) + [None] * (size - n)
         bracket = []
         for i in range(size // 2):
@@ -248,12 +255,13 @@ class KnockoutBracket:
     @staticmethod
     def next_round(winners):
         pairs = []
-        for i in range(0, len(winners), 2):
-            if i + 1 < len(winners):
-                if random.random() < 0.5:
-                    pairs.append((winners[i], winners[i+1]))
-                else:
-                    pairs.append((winners[i+1], winners[i]))
+        lst = list(winners)
+        random.shuffle(lst)
+        for i in range(0, len(lst) - 1, 2):
+            if random.random() < 0.5:
+                pairs.append((lst[i], lst[i+1]))
+            else:
+                pairs.append((lst[i+1], lst[i]))
         return pairs
 
 
@@ -277,8 +285,8 @@ class Tournament:
         self.movetime_ms   = movetime_ms
         self.double_rr     = double_rr
         self.delay         = delay
-        self.analyzer_path = analyzer_path   # path string OR live AnalyzerEngine object
-        self.opening_book  = opening_book    # opening book object
+        self.analyzer_path = analyzer_path
+        self.opening_book  = opening_book
 
         self.current_round = 0
         self.all_games     = []
@@ -291,10 +299,12 @@ class Tournament:
         self.status_msg    = "Ready"
         self.created_at    = datetime.now()
 
-        self._ko_round_winners  = []
-        self._ko_eliminated     = []
-        self._ko_round_games    = {}
-        self._ko_active_players = list(players)
+        self.tournament_id = str(id(self))
+
+        self._ko_pending_winners = []
+        self._ko_eliminated      = []
+        self._ko_round_games     = {}
+        self._ko_active_players  = list(players)
 
         if fmt == self.FORMAT_ROUNDROBIN:
             self._rr_schedule = RoundRobinPairing.generate_all_rounds(
@@ -338,15 +348,20 @@ class Tournament:
                     if w is None or b is None:
                         survivor = w or b
                         if survivor:
-                            self._ko_round_winners.append(survivor)
+                            self._ko_pending_winners.append(survivor)
                         continue
                     g = TournamentGame(self.current_round, w, b)
                     self.round_games.append(g)
                     self.all_games.append(g)
                 self._ko_round_games[self.current_round] = list(self.round_games)
             else:
-                pairs = KnockoutBracket.next_round(self._ko_round_winners)
-                self._ko_round_winners = []
+                prev_winners = list(self._ko_pending_winners)
+                self._ko_pending_winners = []
+                if len(prev_winners) <= 1:
+                    self.winner = prev_winners[0] if prev_winners else None
+                    self._finish()
+                    return
+                pairs = KnockoutBracket.next_round(prev_winners)
                 for w, b in pairs:
                     g = TournamentGame(self.current_round, w, b)
                     self.round_games.append(g)
@@ -354,8 +369,8 @@ class Tournament:
                 self._ko_round_games[self.current_round] = list(self.round_games)
 
     def record_game_result(self, game: TournamentGame, result, reason,
-                        move_history, pgn, duration, opening=None,
-                        eval_history=None):
+                           move_history, pgn, duration, opening=None,
+                           eval_history=None):
         game.result       = result
         game.reason       = reason
         game.pgn          = pgn
@@ -377,15 +392,15 @@ class Tournament:
 
         if self.format == self.FORMAT_KNOCKOUT and ws is not None:
             if ws > bs:
-                self._ko_round_winners.append(game.white)
+                self._ko_pending_winners.append(game.white)
                 self._ko_eliminated.append(game.black)
             elif bs > ws:
-                self._ko_round_winners.append(game.black)
+                self._ko_pending_winners.append(game.black)
                 self._ko_eliminated.append(game.white)
             else:
-                adv = random.choice([game.white, game.black])
-                elim = game.black if adv == game.white else game.white
-                self._ko_round_winners.append(adv)
+                adv  = random.choice([game.white, game.black])
+                elim = game.black if adv is game.white else game.white
+                self._ko_pending_winners.append(adv)
                 self._ko_eliminated.append(elim)
 
     def round_complete(self):
@@ -393,21 +408,30 @@ class Tournament:
 
     def advance_round(self):
         self._update_buchholz()
+
         if self.format == self.FORMAT_SWISS:
             if self.current_round >= self.rounds:
-                self._finish(); return True
-            self._generate_round(); return False
+                self._finish()
+                return True
+            self._generate_round()
+            return False
+
         elif self.format == self.FORMAT_ROUNDROBIN:
             if self.current_round >= self.rounds:
-                self._finish(); return True
-            self._generate_round(); return False
+                self._finish()
+                return True
+            self._generate_round()
+            return False
+
         elif self.format == self.FORMAT_KNOCKOUT:
-            active = self._ko_round_winners
+            active = self._ko_pending_winners
             if len(active) <= 1:
                 self.winner = active[0] if active else None
-                self._finish(); return True
-            self._ko_round_winners = []
-            self._generate_round(); return False
+                self._finish()
+                return True
+            self._generate_round()
+            return False
+
         return True
 
     def _finish(self):
@@ -415,20 +439,22 @@ class Tournament:
         standings = self.get_standings()
         if standings and self.winner is None:
             self.winner = standings[0]
-        self.status_msg = f"Tournament complete! Winner: {self.winner.name if self.winner else '?'}"
+        self.status_msg = (
+            f"Tournament complete! Winner: {self.winner.name if self.winner else '?'}")
 
     def _update_buchholz(self):
         if self.format != self.FORMAT_SWISS:
             return
         score_map = {p.name: p.score for p in self.player_list}
         for p in self.player_list:
-            p.buchholz = sum(score_map.get(opp, 0) for opp in p.opponents if opp != 'BYE')
+            p.buchholz  = sum(score_map.get(opp, 0) for opp in p.opponents if opp != 'BYE')
             p.sonneborn = 0.0
             for g in self.all_games:
-                if g.status != 'done': continue
-                if g.white == p and g.white_score is not None:
+                if g.status != 'done':
+                    continue
+                if g.white is p and g.white_score is not None:
                     p.sonneborn += g.white_score * score_map.get(g.black.name, 0)
-                elif g.black == p and g.black_score is not None:
+                elif g.black is p and g.black_score is not None:
                     p.sonneborn += g.black_score * score_map.get(g.white.name, 0)
 
     def get_standings(self):
@@ -438,12 +464,12 @@ class Tournament:
         elif self.format == self.FORMAT_ROUNDROBIN:
             players.sort(key=lambda p: (-p.score, -p.wins, p.name))
         elif self.format == self.FORMAT_KNOCKOUT:
-            eliminated = [p.name for p in self._ko_eliminated]
+            eliminated_names = [p.name for p in self._ko_eliminated]
             def ko_key(p):
-                if p.name not in eliminated:
+                if p.name not in eliminated_names:
                     return (0, -p.score, p.name)
-                idx = eliminated.index(p.name)
-                return (len(eliminated) - idx, -p.score, p.name)
+                idx = eliminated_names.index(p.name)
+                return (len(eliminated_names) - idx, -p.score, p.name)
             players.sort(key=ko_key)
         return players
 
@@ -778,7 +804,7 @@ class TournamentRunner:
         self._thread         = None
         self.current_engines = []
         self._analyzer       = None
-        self._analyzer_is_external = False  # True = we must NOT stop it on finish
+        self._analyzer_is_external = False
 
     def start(self):
         self._stop_flag  = False
@@ -791,15 +817,9 @@ class TournamentRunner:
     def stop(self):   self._stop_flag = True; self._pause_flag = False
 
     def _run(self):
-        # ── Resolve analyzer ──────────────────────────────────────────────────
-        # tournament.analyzer_path may be:
-        #   (a) a live AnalyzerEngine object  → reuse directly, don't stop it
-        #   (b) a path string                 → create a new engine, stop when done
-        #   (c) None                          → no analysis
         analyzer_ref = self.t.analyzer_path
         if analyzer_ref is not None and AnalyzerEngine is not None:
             if isinstance(analyzer_ref, str):
-                # Path string → start a fresh engine
                 if os.path.isfile(analyzer_ref):
                     try:
                         self._analyzer = AnalyzerEngine(analyzer_ref, "Analyzer")
@@ -813,8 +833,6 @@ class TournamentRunner:
                 else:
                     self.on_status("⚠ Analyzer path not found — running without analysis")
             else:
-                # Live engine object from GUI (AnalyzerEngine / UCIEngine subclass)
-                # Check it is still alive before reusing
                 if hasattr(analyzer_ref, 'alive') and analyzer_ref.alive:
                     self._analyzer = analyzer_ref
                     self._analyzer_is_external = True
@@ -838,16 +856,17 @@ class TournamentRunner:
                     self.on_status(f"Round {self.t.current_round} complete!")
                     time.sleep(0.5)
                     done = self.t.advance_round()
-                    self.on_round_end(self.t.current_round - 1)
-                    if done: break
+                    self.on_round_end(self.t.current_round - (0 if done else 1))
+                    if done:
+                        break
                 else:
                     time.sleep(0.1)
                 continue
 
             self._play_game(game)
-            if self._stop_flag: break
+            if self._stop_flag:
+                break
 
-        # Only stop the analyzer if WE created it (not if it came from the GUI)
         if self._analyzer and not self._analyzer_is_external:
             try: self._analyzer.stop()
             except: pass
@@ -890,8 +909,9 @@ class TournamentRunner:
         start_t      = time.time()
         eval_history = []
         opening_name = None
+        result       = None
+        reason       = ""
 
-        # ── Opening book lookup ────────────────────────────────────────────────
         book = self.t.opening_book
         book_moves_used = 0
         MAX_BOOK_MOVES  = 20
@@ -915,9 +935,6 @@ class TournamentRunner:
 
             uci = None
 
-            # ── Pre-compute legal moves for validation ─────────────────────
-            # Build a set of legal UCI strings so we can validate both book
-            # moves AND engine moves BEFORE applying them to the board.
             try:
                 legal_ucis = set()
                 for (fr, fc, tr, tc, promo) in board.legal_moves():
@@ -925,28 +942,25 @@ class TournamentRunner:
                             f"{chr(ord('a')+tc)}{8-tr}")
                     legal_ucis.add(base + promo.lower() if promo else base)
             except Exception:
-                legal_ucis = None  # validation unavailable — fall through
+                legal_ucis = None
 
-            # ── Try opening book first ─────────────────────────────────────
             if book is not None and book_moves_used < MAX_BOOK_MOVES:
                 raw = self._book_probe(book, board)
                 if raw:
                     raw_norm = raw.strip().lower()
-                    # Only accept the book move if it is actually legal
                     if legal_ucis is None or raw_norm in legal_ucis:
                         uci = raw_norm
                         book_moves_used += 1
                         if hasattr(book, 'get_opening_name'):
-                            oname = book.get_opening_name(board.uci_moves_str())
-                            if oname:
-                                opening_name = oname
+                            try:
+                                oname = book.get_opening_name(board.uci_moves_str())
+                                if oname:
+                                    opening_name = oname
+                            except Exception:
+                                pass
 
-            # ── Fall back to engine ────────────────────────────────────────
             if not uci:
                 mvs = board.uci_moves_str()
-                # Drain stale output before asking for a move.
-                # This prevents responses from a previous search (e.g. caused
-                # by the shared analyzer) from being mistaken for bestmove.
                 try:
                     engine._drain()
                 except Exception:
@@ -960,9 +974,7 @@ class TournamentRunner:
                 reason = f"{player.name} returned no move"
                 break
 
-            # ── Validate engine move before applying ──────────────────────
             if legal_ucis is not None and uci not in legal_ucis:
-                # Promotion: engine may send 'e7e8' without suffix → default queen
                 prefix_match = next(
                     (m for m in legal_ucis if m[:4] == uci[:4]), None)
                 if prefix_match and len(uci) == 4 and len(prefix_match) == 5:
@@ -981,7 +993,6 @@ class TournamentRunner:
 
             last_move = uci
 
-            # Eval from analyzer — uses AnalyzerEngine.eval_position(moves_str)
             cp_val   = None
             mate_val = None
             if self._analyzer:
@@ -995,19 +1006,20 @@ class TournamentRunner:
                                 mate_val = cp_val // 30000 if cp_val != 0 else 0
                             eval_history.append(cp_val)
                     elif hasattr(self._analyzer, 'get_eval'):
-                        # Fallback for other engine wrappers
                         cp_val = self._analyzer.get_eval(mvs_for_eval, movetime_ms=150)
                         if cp_val is not None:
                             eval_history.append(cp_val)
                 except Exception:
                     pass
 
-            self.on_board_update(game, board, last_move, cp_val, mate_val)
+            self.on_board_update(game, board, last_move, cp_val, mate_val, opening_name)
             time.sleep(max(0.02, self.t.delay))
 
         if not result:
             over, result, reason, winner_color = board.game_result()
-            if not result: result = '*'; reason = "Unknown"
+            if not result:
+                result = '*'
+                reason = "Unknown"
 
         duration = int(time.time() - start_t)
         date_str = datetime.now().strftime("%Y.%m.%d")
@@ -1023,18 +1035,13 @@ class TournamentRunner:
         self.on_game_end(game)
 
     def _book_probe(self, book, board):
-        """
-        Query the opening book and return a UCI move string, or None.
-        The returned move is NOT yet validated — callers must check legality.
-        """
         import re
         _UCI_RE = re.compile(r'^[a-h][1-8][a-h][1-8][qrbnQRBN]?$')
 
         def _clean(raw):
-            """Return the move string if it looks like a UCI move, else None."""
             if not raw or not isinstance(raw, str):
                 return None
-            raw = raw.strip().lower().split()[0]  # take first token only
+            raw = raw.strip().lower().split()[0]
             return raw if _UCI_RE.match(raw) else None
 
         try:
@@ -1045,11 +1052,10 @@ class TournamentRunner:
             if hasattr(book, 'lookup'):
                 moves = board.uci_moves_str().split() if board.uci_moves_str() else []
                 result = book.lookup(moves)
-                # lookup() may return (eco, name) tuple from OpeningBook — ignore
                 if isinstance(result, (list, tuple)) and len(result) == 2:
                     candidate = result[0]
                     if isinstance(candidate, str) and not _UCI_RE.match(candidate):
-                        return None  # it was an (eco, name) tuple, not a move
+                        return None
                 return _clean(result) if isinstance(result, str) else None
             if hasattr(book, 'get'):
                 moves = board.uci_moves_str().split() if board.uci_moves_str() else []
@@ -1059,7 +1065,9 @@ class TournamentRunner:
         return None
 
     def _abort_game(self, game, reason):
-        game.result = '*'; game.reason = reason; game.status = 'done'
+        game.result = '*'
+        game.reason = reason
+        game.status = 'done'
         self.on_game_end(game)
 
     def _kill(self, *engines):
@@ -1140,15 +1148,15 @@ class TournamentHistoryWindow:
         tf = tk.Frame(p, bg=PANEL_BG)
         tf.pack(fill='both', expand=True, padx=8, pady=(0,8))
         sb = tk.Scrollbar(tf); sb.pack(side='right', fill='y')
-        cols = ['Rnd','White','Black','Res','Moves']
+        cols = ['Rnd','White','Black','Res','Opening','Moves']
         self.game_tree = ttk.Treeview(tf, columns=cols, show='headings',
                                     yscrollcommand=sb.set, height=28)
         sb.config(command=self.game_tree.yview)
-        wcfg = {'Rnd':36,'White':100,'Black':100,'Res':46,'Moves':50}
+        wcfg = {'Rnd':36,'White':100,'Black':100,'Res':46,'Opening':120,'Moves':50}
         for c in cols:
             self.game_tree.heading(c, text=c)
             self.game_tree.column(c, width=wcfg.get(c,60),
-                                anchor='center' if c not in ('White','Black') else 'w')
+                                anchor='center' if c not in ('White','Black','Opening') else 'w')
         style = ttk.Style()
         style.configure('Treeview', background=LOG_BG, foreground=TEXT,
                         fieldbackground=LOG_BG, borderwidth=0, rowheight=24)
@@ -1168,8 +1176,9 @@ class TournamentHistoryWindow:
                                     font=('Segoe UI', 10, 'bold'),
                                     anchor='center', pady=6)
         self.viewer_hdr.pack(fill='x', padx=8)
+
         pl_row = tk.Frame(p, bg=BG)
-        pl_row.pack(fill='x', padx=8, pady=(0,4))
+        pl_row.pack(fill='x', padx=8, pady=(0,2))
         self.vh_white = tk.Label(pl_row, text="♔  —",
                                 bg="#1c2a1c", fg="#FFD700",
                                 font=('Segoe UI', 9, 'bold'),
@@ -1186,6 +1195,13 @@ class TournamentHistoryWindow:
                                 highlightthickness=1,
                                 highlightbackground="#333344")
         self.vh_black.pack(side='right', fill='x', expand=True, padx=(4,0))
+
+        self.vh_opening_lbl = tk.Label(p, text="",
+                                       bg=BG, fg="#00BFFF",
+                                       font=('Segoe UI', 8, 'italic'),
+                                       anchor='center', pady=2)
+        self.vh_opening_lbl.pack(fill='x', padx=8)
+
         board_area = tk.Frame(p, bg=BG)
         board_area.pack(anchor='center', pady=(4,0))
         self.mini_board = MiniBoardWidget(board_area, show_eval_bar=True)
@@ -1221,6 +1237,8 @@ class TournamentHistoryWindow:
         self.move_box.tag_config('n',   foreground="#555")
         self.move_box.tag_config('res', foreground=ACCENT,
                                 font=('Consolas',9,'bold'))
+        self.move_box.tag_config('op',  foreground="#00BFFF",
+                                font=('Consolas',8,'italic'))
 
     def _populate_game_list(self, *_):
         tree = self.game_tree
@@ -1234,14 +1252,18 @@ class TournamentHistoryWindow:
         for g in games:
             if rflt != "All" and g.result != rflt:
                 continue
-            if flt and flt not in g.white.name.lower() and flt not in g.black.name.lower():
+            if flt and flt not in g.white.name.lower() \
+                    and flt not in g.black.name.lower() \
+                    and flt not in (g.opening or '').lower():
                 continue
-            res_str = g.result or "—"
-            row = [g.round_num, g.white.name, g.black.name, res_str, g.move_count]
-            if g.result == '1-0':    tag = 'wwin'
-            elif g.result == '0-1':  tag = 'bwin'
-            elif g.result == '1/2-1/2': tag = 'draw'
-            else: tag = 'other'
+            res_str     = g.result or "—"
+            opening_str = (g.opening[:22] if g.opening else "—")
+            row = [g.round_num, g.white.name, g.black.name, res_str,
+                   opening_str, g.move_count]
+            if g.result == '1-0':        tag = 'wwin'
+            elif g.result == '0-1':      tag = 'bwin'
+            elif g.result == '1/2-1/2':  tag = 'draw'
+            else:                        tag = 'other'
             iid = tree.insert('', 'end', values=row, tags=(tag,))
             self._game_map[iid] = g
             shown += 1
@@ -1261,11 +1283,17 @@ class TournamentHistoryWindow:
             text=f"Round {game.round_num}  ·  {game.result or '—'}")
         self.vh_white.config(text=f"♔  {game.white.name}")
         self.vh_black.config(text=f"♚  {game.black.name}")
+
+        if game.opening:
+            self.vh_opening_lbl.config(text=f"📖  {game.opening}")
+        else:
+            self.vh_opening_lbl.config(text="")
+
         if game.move_history:
             self.mini_board.set_replay(game.move_history, game.eval_history)
         if game.eval_history:
             self.eval_graph.set_evals(game.eval_history)
-            avg = sum(game.eval_history)/len(game.eval_history)
+            avg     = sum(game.eval_history) / len(game.eval_history)
             max_adv = max(game.eval_history)
             min_adv = min(game.eval_history)
             self.eval_info_lbl.config(
@@ -1273,8 +1301,13 @@ class TournamentHistoryWindow:
         else:
             self.eval_graph.set_evals([])
             self.eval_info_lbl.config(text="No eval data")
+
         self.move_box.config(state='normal')
         self.move_box.delete('1.0', 'end')
+
+        if game.opening:
+            self.move_box.insert('end', f"📖  {game.opening}\n\n", 'op')
+
         for i, (uci, san, fen) in enumerate(game.move_history):
             ply = i + 1
             if ply % 2 == 1:
@@ -1317,13 +1350,6 @@ class TournamentHistoryWindow:
 
 class TournamentSetupDialog:
     def __init__(self, root, attached_analyzer=None, attached_opening_book=None):
-        """
-        attached_analyzer     : AnalyzerEngine instance OR path string already
-                                loaded by LoadingScreen / ChessGUI.
-        attached_opening_book : OpeningBook object already loaded by LoadingScreen
-                                / ChessGUI.
-        Both are auto-wired — the user sees a green ✓ and needs no manual setup.
-        """
         self.root                  = root
         self.result                = None
         self._entries              = []
@@ -1331,15 +1357,12 @@ class TournamentSetupDialog:
         self._attached_book        = attached_opening_book
         self._build()
 
-    # ── Helper: display strings ───────────────────────────────────────────────
-
     def _get_analyzer_display(self):
         a = self._attached_analyzer
         if a is None:
             return "⚠  None attached — optional override below"
         if isinstance(a, str):
             return f"✓  {os.path.basename(a)}"
-        # AnalyzerEngine / UCIEngine stores path as self.path
         if hasattr(a, 'path') and isinstance(a.path, str):
             return f"✓  {os.path.basename(a.path)}"
         if hasattr(a, 'engine_path') and isinstance(a.engine_path, str):
@@ -1356,14 +1379,11 @@ class TournamentSetupDialog:
             return f"✓  {os.path.basename(b.path)}"
         if hasattr(b, 'filename'):
             return f"✓  {os.path.basename(b.filename)}"
-        # OpeningBook loaded from loading_screen may store path in _path
         if hasattr(b, '_path'):
             return f"✓  {os.path.basename(b._path)}"
         n = getattr(b, '_entries', None)
         count = f" ({len(n)} openings)" if n is not None else ""
         return f"✓  Opening book loaded{count}"
-
-    # ── Build UI ──────────────────────────────────────────────────────────────
 
     def _build(self):
         self.dialog = tk.Toplevel(self.root)
@@ -1378,7 +1398,6 @@ class TournamentSetupDialog:
         self.dialog.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
         self.dialog.minsize(700, 640)
 
-        # Header
         hdr = tk.Frame(self.dialog, bg=BG)
         hdr.pack(fill='x', padx=20, pady=(16,0))
         tk.Label(hdr, text="🏆", bg=BG, fg=ACCENT,
@@ -1390,7 +1409,6 @@ class TournamentSetupDialog:
                 bg=BG, fg="#666", font=('Segoe UI',9)).pack(anchor='w')
         tk.Frame(self.dialog, bg=ACCENT, height=2).pack(fill='x', padx=20, pady=(10,6))
 
-        # Settings row
         cfg = tk.Frame(self.dialog, bg=BG)
         cfg.pack(fill='x', padx=20, pady=(0,6))
 
@@ -1429,7 +1447,7 @@ class TournamentSetupDialog:
         mf = tk.Frame(cfg, bg=BG); mf.pack(side='left', padx=(0,16))
         tk.Label(mf, text="Move time (ms):", bg=BG, fg=TEXT,
                 font=('Segoe UI',9)).pack(anchor='w')
-        self.movetime_var = tk.IntVar(value=500)
+        self.movetime_var = tk.IntVar(value=1000)
         tk.Spinbox(mf, from_=100, to=30000, increment=100,
                 textvariable=self.movetime_var,
                 width=7, bg=LOG_BG, fg=TEXT,
@@ -1439,14 +1457,13 @@ class TournamentSetupDialog:
         df = tk.Frame(cfg, bg=BG); df.pack(side='left')
         tk.Label(df, text="Delay (s):", bg=BG, fg=TEXT,
                 font=('Segoe UI',9)).pack(anchor='w')
-        self.delay_var = tk.DoubleVar(value=0.2)
+        self.delay_var = tk.DoubleVar(value=0.5)
         tk.Spinbox(df, from_=0.0, to=5.0, increment=0.1, format='%.1f',
                 textvariable=self.delay_var,
                 width=5, bg=LOG_BG, fg=TEXT,
                 buttonbackground=BTN_BG,
                 font=('Consolas',9), relief='flat').pack(ipady=3)
 
-        # Double RR checkbox
         row2 = tk.Frame(self.dialog, bg=BG)
         row2.pack(fill='x', padx=20, pady=(0,4))
         self.double_rr_var = tk.BooleanVar(value=False)
@@ -1458,7 +1475,6 @@ class TournamentSetupDialog:
             font=('Segoe UI',9))
         self.drr_chk.pack(side='left', padx=(0,20))
 
-        # ── Attached resources panel ──────────────────────────────────────────
         res_frame = tk.Frame(self.dialog, bg=PANEL_BG,
                              highlightthickness=1,
                              highlightbackground="#2a3a2a")
@@ -1468,7 +1484,6 @@ class TournamentSetupDialog:
                 bg=PANEL_BG, fg=ACCENT,
                 font=('Segoe UI',9,'bold')).pack(anchor='w', padx=10, pady=(6,2))
 
-        # Analyzer row
         ana_row = tk.Frame(res_frame, bg=PANEL_BG)
         ana_row.pack(fill='x', padx=10, pady=(0,2))
         tk.Label(ana_row, text="🔍 Analyzer:",
@@ -1482,7 +1497,6 @@ class TournamentSetupDialog:
             font=('Consolas', 8), anchor='w')
         self._ana_status_lbl.pack(side='left', fill='x', expand=True)
 
-        # Optional override entry only when nothing is attached
         if not self._attached_analyzer:
             self._ana_override_var = tk.StringVar()
             tk.Entry(ana_row, textvariable=self._ana_override_var,
@@ -1502,9 +1516,8 @@ class TournamentSetupDialog:
                     font=('Segoe UI',8), padx=5, pady=1,
                     cursor='hand2').pack(side='left', padx=2)
         else:
-            self._ana_override_var = None  # not needed — already attached
+            self._ana_override_var = None
 
-        # Opening book row
         book_row = tk.Frame(res_frame, bg=PANEL_BG)
         book_row.pack(fill='x', padx=10, pady=(0,6))
         tk.Label(book_row, text="📖 Opening Book:",
@@ -1518,7 +1531,6 @@ class TournamentSetupDialog:
 
         tk.Frame(self.dialog, bg='#2a2a4a', height=1).pack(fill='x', padx=20, pady=4)
 
-        # ── Engine list ───────────────────────────────────────────────────────
         tk.Label(self.dialog, text="Engine Participants:",
                 bg=BG, fg=ACCENT, font=('Segoe UI',10,'bold')).pack(anchor='w', padx=20)
         tk.Label(self.dialog,
@@ -1560,7 +1572,6 @@ class TournamentSetupDialog:
                 font=('Segoe UI',9), padx=10, pady=5,
                 cursor='hand2').pack(side='left')
 
-        # Footer
         tk.Frame(self.dialog, bg=ACCENT, height=2).pack(fill='x', padx=20, pady=(8,0))
         foot = tk.Frame(self.dialog, bg=BG)
         foot.pack(fill='x', padx=20, pady=(6,14))
@@ -1628,25 +1639,13 @@ class TournamentSetupDialog:
             row.destroy()
 
     def _resolve_analyzer(self):
-        """
-        Return the analyzer to pass into Tournament.analyzer_path.
-        Priority:
-          1. Live AnalyzerEngine object attached from GUI  → pass object directly
-          2. Path string attached from GUI                 → pass path string
-          3. Manual override entry (if nothing attached)   → pass path string
-          4. Nothing                                       → None
-        """
         a = self._attached_analyzer
         if a is not None:
             if isinstance(a, str):
-                # It's a path string
                 return a if os.path.isfile(a) else None
-            # It's a live engine object (AnalyzerEngine / UCIEngine subclass)
-            # — verify it has a .path and the file still exists
             if hasattr(a, 'path') and isinstance(a.path, str):
-                return a  # pass the live object; runner will NOT stop it
-            return a  # unknown engine wrapper, pass as-is
-        # No attached analyzer — check manual override entry
+                return a
+            return a
         if self._ana_override_var:
             p = self._ana_override_var.get().strip()
             if p and os.path.isfile(p):
@@ -1683,8 +1682,8 @@ class TournamentSetupDialog:
             movetime_ms   = self.movetime_var.get(),
             double_rr     = self.double_rr_var.get(),
             delay         = self.delay_var.get(),
-            analyzer_path = self._resolve_analyzer(),   # live obj OR path OR None
-            opening_book  = self._attached_book,        # book obj directly from GUI
+            analyzer_path = self._resolve_analyzer(),
+            opening_book  = self._attached_book,
         )
         self.dialog.destroy()
 
@@ -1698,13 +1697,21 @@ class TournamentSetupDialog:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TournamentWindow:
-    def __init__(self, root, tournament: Tournament, db_path=None):
-        self.root        = root
-        self.t           = tournament
-        self.db_path     = db_path
-        self.runner      = None
+    def __init__(self, root, tournament: Tournament, db=None, db_path=None):
+        self.root         = root
+        self.t            = tournament
+        self.runner       = None
         self.current_game: TournamentGame = None
         self._history_win = None
+
+        if db is not None:
+            self.db = db
+        elif db_path and Database is not None:
+            self.db = Database(db_path)
+        else:
+            self.db = None
+
+        self.db_path = db_path or (db.db_path if db is not None else None)
 
         self.win = tk.Toplevel(root)
         self.win.title(f"🏆 Tournament — {tournament.name}")
@@ -1717,12 +1724,13 @@ class TournamentWindow:
         self._build_ui()
         self._refresh_standings()
 
-        # Build status line showing which resources are attached
         has_book     = tournament.opening_book is not None
         has_analyzer = tournament.analyzer_path is not None
+        has_db       = self.db is not None
         extras = []
         if has_book:     extras.append("📖 Book")
         if has_analyzer: extras.append("🔍 Analyzer")
+        if has_db:       extras.append("💾 DB")
         extras_str = "  ·  " + "  ·  ".join(extras) if extras else ""
         self._status(
             f"Tournament ready: {tournament.format}  ·  "
@@ -1764,6 +1772,9 @@ class TournamentWindow:
         if self.t.analyzer_path:
             tk.Label(tb, text="🔍", bg=PANEL_BG, fg="#00BFFF",
                     font=('Segoe UI',10)).pack(side='left', padx=(2,0))
+        if self.db:
+            tk.Label(tb, text="💾", bg=PANEL_BG, fg="#AAFFAA",
+                    font=('Segoe UI',10)).pack(side='left', padx=(2,0))
 
         tk.Label(tb, text=f"  {len(self.t.player_list)} players  ·  "
                         f"{self.t.rounds} rounds  ·  "
@@ -1796,8 +1807,9 @@ class TournamentWindow:
                                 font=('Segoe UI',11,'bold'),
                                 anchor='center', pady=6)
         self.game_hdr.pack(fill='x', padx=6, pady=(4,2))
+
         players_row = tk.Frame(p, bg=BG)
-        players_row.pack(fill='x', padx=6, pady=(0,4))
+        players_row.pack(fill='x', padx=6, pady=(0,2))
         self.white_lbl = tk.Label(players_row, text="♔ —",
                                 bg="#1c2a1c", fg="#FFD700",
                                 font=('Segoe UI',10,'bold'),
@@ -1814,6 +1826,13 @@ class TournamentWindow:
                                 highlightthickness=1,
                                 highlightbackground="#444444")
         self.black_lbl.pack(side='right', fill='x', expand=True, padx=(4,0))
+
+        self.opening_lbl = tk.Label(p, text="",
+                                    bg=BG, fg="#00BFFF",
+                                    font=('Segoe UI', 8, 'italic'),
+                                    anchor='center', pady=2)
+        self.opening_lbl.pack(fill='x', padx=6)
+
         board_outer = tk.Frame(p, bg=BG)
         board_outer.pack(anchor='center', pady=4)
         self.mini_board = MiniBoardWidget(board_outer, show_eval_bar=True)
@@ -1915,17 +1934,17 @@ class TournamentWindow:
         tf = tk.Frame(p, bg=PANEL_BG)
         tf.pack(fill='both', expand=True, padx=8, pady=(0,8))
         sb = tk.Scrollbar(tf); sb.pack(side='right', fill='y')
-        cols = ['Rnd','#','White','Black','Result','Reason','Moves']
+        cols = ['Rnd','#','White','Black','Result','Opening','Moves']
         self.schedule_tree = ttk.Treeview(
             tf, columns=cols, show='headings', yscrollcommand=sb.set)
         sb.config(command=self.schedule_tree.yview)
-        wcfg = {'Rnd':40,'#':30,'White':140,'Black':140,
-                'Result':65,'Reason':140,'Moves':55}
+        wcfg = {'Rnd':40,'#':30,'White':130,'Black':130,
+                'Result':55,'Opening':130,'Moves':50}
         for c in cols:
             self.schedule_tree.heading(c, text=c)
             self.schedule_tree.column(
                 c, width=wcfg.get(c,80),
-                anchor='center' if c not in ('White','Black','Reason') else 'w')
+                anchor='center' if c not in ('White','Black','Opening') else 'w')
         self.schedule_tree.tag_configure('done_w',    foreground="#FFD700")
         self.schedule_tree.tag_configure('done_b',    foreground="#C8C8C8")
         self.schedule_tree.tag_configure('done_draw', foreground="#00BFFF")
@@ -1949,8 +1968,8 @@ class TournamentWindow:
         self.history_tree = ttk.Treeview(
             tf, columns=cols, show='headings', yscrollcommand=sb.set)
         sb.config(command=self.history_tree.yview)
-        hcfg = {'Rnd':40,'White':120,'Black':120,'Result':60,
-                'Opening':130,'Moves':55,'Time':55}
+        hcfg = {'Rnd':40,'White':110,'Black':110,'Result':55,
+                'Opening':130,'Moves':50,'Time':55}
         for c in cols:
             self.history_tree.heading(c, text=c)
             self.history_tree.column(
@@ -1982,31 +2001,53 @@ class TournamentWindow:
     def _draw_bracket(self):
         c = self.bracket_canvas
         c.delete('all')
-        if self.t.format != Tournament.FORMAT_KNOCKOUT: return
+        if self.t.format != Tournament.FORMAT_KNOCKOUT:
+            return
         rounds_data = self.t._ko_round_games
-        if not rounds_data: return
+        if not rounds_data:
+            return
+
         n_rounds = max(rounds_data.keys())
-        col_w = 200; row_h = 60; pad = 20
-        for rnd in range(1, n_rounds+1):
+        col_w = 210
+        pad   = 24
+        row_h = 64
+
+        for rnd in range(1, n_rounds + 1):
             games = rounds_data.get(rnd, [])
-            x = pad + (rnd-1) * col_w
-            c.create_text(x + col_w//2, pad//2, text=f"Round {rnd}",
-                        fill=ACCENT, font=('Segoe UI',9,'bold'))
+            x = pad + (rnd - 1) * col_w
+
+            c.create_text(x + col_w // 2, pad // 2 + 4,
+                          text=f"Round {rnd}  ({len(games)} games)",
+                          fill=ACCENT, font=('Segoe UI', 9, 'bold'))
+
             for i, g in enumerate(games):
-                y = pad + i * row_h * 2
-                c.create_rectangle(x+10, y+10, x+col_w-10, y+row_h-10,
-                                    fill=PANEL_BG, outline="#333")
-                wname = g.white.name[:18]; bname = g.black.name[:18]
-                wc = "#FFD700"; bc = "#C8C8C8"
-                if g.result == '1-0':       wc="#00FF80"
-                elif g.result == '0-1':     bc="#00FF80"
-                elif g.result == '1/2-1/2': wc=bc="#00BFFF"
-                c.create_text(x+16, y+22, text=f"♔ {wname}",
-                            fill=wc, font=('Consolas',8), anchor='w')
-                c.create_text(x+16, y+38, text=f"♚ {bname}",
-                            fill=bc, font=('Consolas',8), anchor='w')
-                c.create_text(x+col_w-14, y+30, text=g.result or "—",
-                            fill=ACCENT, font=('Consolas',8,'bold'), anchor='e')
+                y = pad + 20 + i * row_h * 2
+                c.create_rectangle(x + 8, y + 4, x + col_w - 8, y + row_h - 4,
+                                   fill=PANEL_BG, outline="#444")
+                wname = g.white.name[:20]
+                bname = g.black.name[:20]
+                wc = "#FFD700"
+                bc = "#C8C8C8"
+                if g.result == '1-0':
+                    wc = "#00FF80"
+                elif g.result == '0-1':
+                    bc = "#00FF80"
+                elif g.result == '1/2-1/2':
+                    wc = bc = "#00BFFF"
+                c.create_text(x + 14, y + 20, text=f"♔ {wname}",
+                              fill=wc, font=('Consolas', 8), anchor='w')
+                c.create_text(x + 14, y + 38, text=f"♚ {bname}",
+                              fill=bc, font=('Consolas', 8), anchor='w')
+                res_txt = g.result or ("▶" if g.status == 'running' else "…")
+                c.create_text(x + col_w - 12, y + 29, text=res_txt,
+                              fill=ACCENT, font=('Consolas', 8, 'bold'), anchor='e')
+
+                if rnd < n_rounds:
+                    mid_y = y + row_h // 2
+                    next_x = x + col_w - 8
+                    c.create_line(next_x, mid_y, next_x + 16, mid_y,
+                                  fill="#444", width=1)
+
         c.configure(scrollregion=c.bbox('all'))
 
     # ── Event handlers ────────────────────────────────────────────────────────
@@ -2017,8 +2058,8 @@ class TournamentWindow:
         vals = self.schedule_tree.item(sel[0])['values']
         rnd, seq = int(vals[0]), int(vals[1])
         rnd_games = [x for x in self.t.all_games if x.round_num == rnd]
-        if 0 <= seq-1 < len(rnd_games):
-            self._replay_game(rnd_games[seq-1])
+        if 0 <= seq - 1 < len(rnd_games):
+            self._replay_game(rnd_games[seq - 1])
 
     def _on_history_dbl(self, event):
         sel = self.history_tree.selection()
@@ -2027,7 +2068,8 @@ class TournamentWindow:
         rnd, wname, bname = int(vals[0]), vals[1], vals[2]
         for g in self.t.get_all_completed_games():
             if g.round_num == rnd and g.white.name == wname and g.black.name == bname:
-                self._replay_game(g); return
+                self._replay_game(g)
+                return
 
     def _replay_game(self, game: TournamentGame):
         if not game.move_history:
@@ -2038,6 +2080,10 @@ class TournamentWindow:
                 f"[Rnd {game.round_num}]  {game.result}")
         self.white_lbl.config(text=f"♔  {game.white.name}")
         self.black_lbl.config(text=f"♚  {game.black.name}")
+        if game.opening:
+            self.opening_lbl.config(text=f"📖  {game.opening}")
+        else:
+            self.opening_lbl.config(text="")
         self.mini_board.set_replay(game.move_history, game.eval_history)
         self._live_evals = list(game.eval_history)
         self.live_eval_graph.set_evals(self._live_evals)
@@ -2061,21 +2107,24 @@ class TournamentWindow:
             text=f"▶  Round {game.round_num}:  {game.white.name}  vs  {game.black.name}")
         self.white_lbl.config(text=f"♔  {game.white.name}")
         self.black_lbl.config(text=f"♚  {game.black.name}")
+        self.opening_lbl.config(text="")
         self._live_evals = []
+        self._current_opening_in_log = False
         self.live_eval_graph.set_evals([])
         self.move_log.config(state='normal')
-        self.move_log.delete('1.0','end')
+        self.move_log.delete('1.0', 'end')
         self.move_log.config(state='disabled')
         self._refresh_schedule()
 
-    def _cb_board_update(self, game, board, last_move, eval_cp=None, eval_mate=None):
+    def _cb_board_update(self, game, board, last_move,
+                         eval_cp=None, eval_mate=None, opening_name=None):
         self.win.after(0, self._on_board_update_ui, board, last_move,
-                        len(board.move_history),
-                        board.move_history[-1] if board.move_history else None,
-                        eval_cp, eval_mate)
+                       len(board.move_history),
+                       board.move_history[-1] if board.move_history else None,
+                       eval_cp, eval_mate, opening_name)
 
     def _on_board_update_ui(self, board, last_move, ply, last_hist,
-                            eval_cp, eval_mate):
+                            eval_cp, eval_mate, opening_name=None):
         self.mini_board.update_live(board, last_move, eval_cp, eval_mate)
         if last_hist:
             uci, san, fen = last_hist
@@ -2083,6 +2132,15 @@ class TournamentWindow:
         if eval_cp is not None:
             self._live_evals.append(eval_cp)
             self.live_eval_graph.set_evals(self._live_evals)
+        if opening_name:
+            self.opening_lbl.config(text=f"📖  {opening_name}")
+            if not getattr(self, '_current_opening_in_log', False):
+                self._current_opening_in_log = True
+                self._last_opening_in_log = opening_name
+                self._prepend_opening_to_log(opening_name)
+            elif getattr(self, '_last_opening_in_log', None) != opening_name:
+                self._last_opening_in_log = opening_name
+                self._update_opening_in_log(opening_name)
 
     def _append_move(self, ply, san):
         self.move_log.config(state='normal')
@@ -2093,7 +2151,8 @@ class TournamentWindow:
         else:
             self.move_log.insert('end', san + "  ", 'b')
         lines = int(self.move_log.index('end-1c').split('.')[0])
-        if lines > 1000: self.move_log.delete('1.0','100.0')
+        if lines > 1000:
+            self.move_log.delete('1.0', '100.0')
         self.move_log.see('end')
         self.move_log.config(state='disabled')
 
@@ -2121,6 +2180,8 @@ class TournamentWindow:
         self._status(f"✓ Round {rnd} complete")
         self._refresh_standings()
         self._refresh_schedule()
+        if self.t.format == Tournament.FORMAT_KNOCKOUT:
+            self.win.after(0, self._draw_bracket)
 
     def _cb_tournament_end(self, t):
         self.win.after(0, self._on_tournament_end_ui, t)
@@ -2145,7 +2206,8 @@ class TournamentWindow:
 
     def _start(self):
         if self.runner and not self.runner._stop_flag:
-            self._status("Already running."); return
+            self._status("Already running.")
+            return
         self.runner = TournamentRunner(
             tournament        = self.t,
             on_game_start     = self._cb_game_start,
@@ -2180,7 +2242,7 @@ class TournamentWindow:
         for item in tree.get_children():
             tree.delete(item)
         standings = self.t.get_standings()
-        rnd = self.t.current_round
+        rnd   = self.t.current_round
         total = self.t.rounds
         self.round_info_lbl.config(
             text=f"Round {rnd} / {total}  ·  "
@@ -2188,11 +2250,11 @@ class TournamentWindow:
         cols = list(tree['columns'])
         for i, p in enumerate(standings, 1):
             row = [i, p.name, f"{p.score:.1f}", p.wins, p.draws, p.losses,
-                p.games_played]
+                   p.games_played]
             if 'BH' in cols:
                 row += [f"{p.buchholz:.1f}", f"{p.sonneborn:.1f}"]
             tag = 'gold' if i==1 else 'silver' if i==2 else \
-                'bronze' if i==3 else 'normal'
+                  'bronze' if i==3 else 'normal'
             if self.current_game and p.name in (
                     self.current_game.white.name,
                     self.current_game.black.name):
@@ -2206,18 +2268,18 @@ class TournamentWindow:
         for rnd in range(1, self.t.current_round + 1):
             round_games = [g for g in self.t.all_games if g.round_num == rnd]
             for seq, g in enumerate(round_games, 1):
-                result_str = g.result or "—"
-                reason_str = g.reason[:30] if g.result else ""
-                moves_str  = str(g.move_count) if g.status=='done' else ""
+                result_str  = g.result or "—"
+                opening_str = (g.opening[:22] if g.opening else "")
+                moves_str   = str(g.move_count) if g.status == 'done' else ""
                 row = [rnd, seq, g.white.name, g.black.name,
-                        result_str, reason_str, moves_str]
-                if g.status == 'running':       tag = 'running'
+                       result_str, opening_str, moves_str]
+                if g.status == 'running':        tag = 'running'
                 elif g.status == 'done':
-                    if g.result == '1-0':       tag = 'done_w'
-                    elif g.result == '0-1':     tag = 'done_b'
-                    elif g.result == '1/2-1/2': tag = 'done_draw'
-                    else:                       tag = 'pending'
-                else:                           tag = 'pending'
+                    if g.result == '1-0':        tag = 'done_w'
+                    elif g.result == '0-1':      tag = 'done_b'
+                    elif g.result == '1/2-1/2':  tag = 'done_draw'
+                    else:                        tag = 'pending'
+                else:                            tag = 'pending'
                 tree.insert('', 'end', values=row, tags=(tag,))
         ch = tree.get_children()
         if ch: tree.see(ch[-1])
@@ -2229,17 +2291,35 @@ class TournamentWindow:
         for g in reversed(self.t.get_all_completed_games()):
             dur_s = f"{g.duration//60}m{g.duration%60}s" if g.duration else "—"
             row = [g.round_num, g.white.name, g.black.name,
-                    g.result or "—",
-                    (g.opening[:20] if g.opening else "—"),
-                    g.move_count, dur_s]
+                   g.result or "—",
+                   (g.opening[:22] if g.opening else "—"),
+                   g.move_count, dur_s]
             if g.result == '1-0':      tag = 'wwin'
             elif g.result == '0-1':    tag = 'bwin'
             else:                      tag = 'draw'
             tree.insert('', 'end', values=row, tags=(tag,))
 
+    def _prepend_opening_to_log(self, opening_name):
+        self.move_log.config(state='normal')
+        current = self.move_log.get('1.0', 'end-1c')
+        self.move_log.delete('1.0', 'end')
+        self.move_log.insert('end', f"📖  {opening_name}\n", 'book')
+        if current.strip():
+            self.move_log.insert('end', current)
+        self.move_log.config(state='disabled')
+
+    def _update_opening_in_log(self, opening_name):
+        self.move_log.config(state='normal')
+        first_line_end = self.move_log.index('1.end')
+        self.move_log.delete('1.0', f'{first_line_end}+1c')
+        self.move_log.insert('1.0', f"📖  {opening_name}\n", 'book')
+        self.move_log.config(state='disabled')
+
     def _log_game_moves(self, game: TournamentGame):
         self.move_log.config(state='normal')
         self.move_log.delete('1.0', 'end')
+        if game.opening:
+            self.move_log.insert('end', f"📖 {game.opening}\n\n", 'book')
         for i, (uci, san, fen) in enumerate(game.move_history):
             ply = i + 1
             if ply % 2 == 1:
@@ -2285,18 +2365,18 @@ class TournamentWindow:
         tree = ttk.Treeview(tf, columns=cols, show='headings',
                             yscrollcommand=sb.set, height=8)
         sb.config(command=tree.yview)
-        for c,w in [('#',30),('Engine',200),('Score',55),('W',40),('D',40),('L',40)]:
+        for c, w in [('#',30),('Engine',200),('Score',55),('W',40),('D',40),('L',40)]:
             tree.heading(c, text=c)
-            tree.column(c, width=w, anchor='center' if c!='Engine' else 'w')
+            tree.column(c, width=w, anchor='center' if c != 'Engine' else 'w')
         tree.tag_configure('gold',   foreground="#FFD700")
         tree.tag_configure('silver', foreground="#C0C0C0")
         tree.tag_configure('bronze', foreground="#CD7F32")
         tree.tag_configure('normal', foreground=TEXT)
-        for i,p in enumerate(self.t.get_standings(), 1):
+        for i, p in enumerate(self.t.get_standings(), 1):
             tag = 'gold' if i==1 else 'silver' if i==2 else \
-                'bronze' if i==3 else 'normal'
-            tree.insert('','end',
-                values=[i,p.name,f"{p.score:.1f}",p.wins,p.draws,p.losses],
+                  'bronze' if i==3 else 'normal'
+            tree.insert('', 'end',
+                values=[i, p.name, f"{p.score:.1f}", p.wins, p.draws, p.losses],
                 tags=(tag,))
         tree.pack(fill='both', expand=True)
         bf = tk.Frame(d, bg=BG)
@@ -2314,7 +2394,34 @@ class TournamentWindow:
     # ── DB persistence ────────────────────────────────────────────────────────
 
     def _save_game_db(self, game: TournamentGame):
-        if not self.db_path or not game.pgn:
+        if not game.pgn:
+            return
+
+        if self.db is not None:
+            game_id, t_game_id = self.db.save_tournament_game(
+                tournament_id   = self.t.tournament_id,
+                tournament_name = self.t.name,
+                fmt             = self.t.format,
+                round_num       = game.round_num,
+                white_name      = game.white.name,
+                black_name      = game.black.name,
+                result          = game.result or '*',
+                reason          = game.reason,
+                pgn             = game.pgn,
+                move_count      = game.move_count,
+                duration_sec    = game.duration,
+                opening         = game.opening or None,
+            )
+            if game_id:
+                print(f"[DB] Saved tournament game #{game_id} "
+                      f"(t_game #{t_game_id}): "
+                      f"{game.white.name} vs {game.black.name} → {game.result}")
+            else:
+                print(f"[DB] Failed to save: "
+                      f"{game.white.name} vs {game.black.name}")
+            return
+
+        if not self.db_path:
             return
         try:
             conn = sqlite3.connect(self.db_path)
@@ -2347,7 +2454,7 @@ class TournamentWindow:
                 move_count,duration_sec,opening,date,time)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ''', (
-                str(id(self.t)), self.t.name, self.t.format, game.round_num,
+                self.t.tournament_id, self.t.name, self.t.format, game.round_num,
                 game.white.name, game.black.name, game.result or '*',
                 game.reason, game.pgn, game.move_count, game.duration,
                 game.opening or '', now.strftime("%Y.%m.%d"), now.strftime("%H:%M:%S"),
@@ -2355,63 +2462,755 @@ class TournamentWindow:
             conn.commit()
             conn.close()
         except Exception as e:
-            print(f"[TournamentWindow._save_game_db] {e}")
+            print(f"[TournamentWindow._save_game_db fallback] {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Entry point  — call from your ChessGUI
+#  Tournament Manager
+#  Keeps a live registry of all Tournament objects in the current session.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def open_tournament(root, db_path=None, analyzer=None, opening_book=None):
+class TournamentManager:
+    """
+    Central registry for all Tournament objects created in this session.
+    Pass a single shared instance to every open_tournament() / open_tournament_list()
+    call so the list window always reflects the full picture.
+    """
+
+    def __init__(self):
+        self._entries: list[dict]          = []   # metadata dicts, newest first
+        self._windows: dict[str, object]   = {}   # tournament_id → TournamentWindow
+
+    # ── Registration ──────────────────────────────────────────────────────────
+
+    def register(self, tournament: Tournament,
+                 win: "TournamentWindow | None" = None) -> None:
+        entry = self._make_entry(tournament)
+        for i, e in enumerate(self._entries):
+            if e["id"] == tournament.tournament_id:
+                self._entries[i] = entry
+                break
+        else:
+            self._entries.insert(0, entry)
+        if win is not None:
+            self._windows[tournament.tournament_id] = win
+
+    def update(self, tournament: Tournament) -> None:
+        """Refresh metadata snapshot (call after each round / game end)."""
+        self.register(tournament)
+
+    def set_window(self, tid: str, win: "TournamentWindow") -> None:
+        self._windows[tid] = win
+
+    # ── Query ─────────────────────────────────────────────────────────────────
+
+    def get_all(self) -> list[dict]:
+        return list(self._entries)
+
+    def get_window(self, tid: str) -> "TournamentWindow | None":
+        return self._windows.get(tid)
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _make_entry(t: Tournament) -> dict:
+        return {
+            "id":      t.tournament_id,
+            "name":    t.name,
+            "format":  t.format,
+            "players": len(t.player_list),
+            "rounds":  t.rounds,
+            "obj":     t,
+            "created": t.created_at.strftime("%Y-%m-%d  %H:%M"),
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Tournament List Window
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TournamentListWindow:
+    """
+    Persistent session overview window.
+
+    Shows every tournament created since the app launched, lets the user jump
+    to any tournament window, start new ones, browse game history, and export
+    all PGNs in one shot.
+    """
+
+    _COL_W = {
+        '#': 34, 'Name': 200, 'Format': 100, 'Players': 62,
+        'Rounds': 58, 'Games': 58, 'Status': 80,
+        'Winner': 160, 'Started': 130,
+    }
+
+    def __init__(self, root, manager: TournamentManager,
+                 db=None, db_path=None,
+                 analyzer=None, opening_book=None):
+        self.root         = root
+        self.manager      = manager
+        self.db           = db
+        self.db_path      = db_path
+        self.analyzer     = analyzer
+        self.opening_book = opening_book
+
+        self.win = tk.Toplevel(root)
+        self.win.title("🏆 Tournament List")
+        self.win.configure(bg=BG)
+        self.win.geometry("1020x560")
+        self.win.resizable(True, True)
+        self.win.minsize(720, 380)
+
+        self._id_map:    dict[str, str] = {}   # treeview iid → tournament_id
+        self._sort_col:  str | None     = None
+        self._sort_rev:  bool           = False
+
+        self._build()
+        self._refresh()
+        self._poll()
+
+    # ── Build ─────────────────────────────────────────────────────────────────
+
+    def _build(self):
+        self._build_header()
+        self._build_filter_row()
+        self._build_tree()
+        self._build_status_bar()
+
+    def _build_header(self):
+        hdr = tk.Frame(self.win, bg=PANEL_BG,
+                       highlightthickness=1, highlightbackground="#333")
+        hdr.pack(fill='x')
+
+        # Left: icon + title
+        lf = tk.Frame(hdr, bg=PANEL_BG)
+        lf.pack(side='left', padx=(12, 0), pady=8)
+        tk.Label(lf, text="🏆", bg=PANEL_BG, fg=ACCENT,
+                 font=('Segoe UI', 22)).pack(side='left', padx=(0, 8))
+        tf = tk.Frame(lf, bg=PANEL_BG)
+        tf.pack(side='left')
+        tk.Label(tf, text="TOURNAMENT LIST", bg=PANEL_BG, fg=ACCENT,
+                 font=('Segoe UI', 13, 'bold')).pack(anchor='w')
+        tk.Label(tf, text="All tournaments in this session",
+                 bg=PANEL_BG, fg="#555",
+                 font=('Segoe UI', 8)).pack(anchor='w')
+
+        # Right: action buttons
+        btn = dict(bg=BTN_BG, fg=TEXT, relief='flat',
+                   font=('Segoe UI', 9), padx=10, pady=6, cursor='hand2')
+        tk.Button(hdr, text="✕  Close",
+                  command=self.win.destroy, **btn
+                  ).pack(side='right', padx=(0, 8), pady=8)
+        tk.Button(hdr, text="📤  Export All PGN",
+                  command=self._export_all_pgn, **btn
+                  ).pack(side='right', padx=0, pady=8)
+        tk.Button(hdr, text="📜  Game History",
+                  command=self._open_history, **btn
+                  ).pack(side='right', padx=0, pady=8)
+        tk.Button(hdr, text="🔍  Open Selected",
+                  command=self._open_selected, **btn
+                  ).pack(side='right', padx=0, pady=8)
+        tk.Button(hdr, text="➕  New Tournament",
+                  command=self._new_tournament,
+                  bg=ACCENT, fg='white', activebackground=BTN_HOV,
+                  relief='flat', font=('Segoe UI', 9, 'bold'),
+                  padx=12, pady=6, cursor='hand2'
+                  ).pack(side='right', padx=8, pady=8)
+
+        tk.Frame(self.win, bg=ACCENT, height=2).pack(fill='x')
+
+    def _build_filter_row(self):
+        frow = tk.Frame(self.win, bg=BG)
+        frow.pack(fill='x', padx=10, pady=(6, 2))
+
+        # Text search
+        tk.Label(frow, text="Search:", bg=BG, fg="#888",
+                 font=('Segoe UI', 8)).pack(side='left')
+        self._filter_var = tk.StringVar()
+        self._filter_var.trace_add('write', lambda *_: self._refresh())
+        tk.Entry(frow, textvariable=self._filter_var,
+                 bg=LOG_BG, fg=TEXT, font=('Segoe UI', 8),
+                 width=20, relief='flat',
+                 insertbackground=TEXT).pack(side='left', padx=(4, 16), ipady=3)
+
+        # Format filter
+        tk.Label(frow, text="Format:", bg=BG, fg="#888",
+                 font=('Segoe UI', 8)).pack(side='left')
+        self._fmt_filter = tk.StringVar(value="All")
+        for val in ["All", Tournament.FORMAT_SWISS,
+                    Tournament.FORMAT_ROUNDROBIN,
+                    Tournament.FORMAT_KNOCKOUT]:
+            tk.Radiobutton(frow, text=val, variable=self._fmt_filter,
+                           value=val, bg=BG, fg="#AAA",
+                           selectcolor=BTN_BG, activebackground=BG,
+                           font=('Segoe UI', 8),
+                           command=self._refresh
+                           ).pack(side='left', padx=2)
+
+        # Status filter
+        tk.Label(frow, text="  Status:", bg=BG, fg="#888",
+                 font=('Segoe UI', 8)).pack(side='left', padx=(10, 0))
+        self._status_filter = tk.StringVar(value="All")
+        for val in ["All", "Running", "Finished", "Pending"]:
+            tk.Radiobutton(frow, text=val, variable=self._status_filter,
+                           value=val, bg=BG, fg="#AAA",
+                           selectcolor=BTN_BG, activebackground=BG,
+                           font=('Segoe UI', 8),
+                           command=self._refresh
+                           ).pack(side='left', padx=2)
+
+    def _build_tree(self):
+        tf = tk.Frame(self.win, bg=BG)
+        tf.pack(fill='both', expand=True, padx=10, pady=(2, 0))
+
+        sb = tk.Scrollbar(tf)
+        sb.pack(side='right', fill='y')
+
+        cols = list(self._COL_W.keys())
+        self.tree = ttk.Treeview(tf, columns=cols, show='headings',
+                                  yscrollcommand=sb.set)
+        sb.config(command=self.tree.yview)
+
+        for c in cols:
+            self.tree.heading(c, text=c,
+                              command=lambda _c=c: self._sort_by(_c))
+            self.tree.column(c, width=self._COL_W[c],
+                             anchor='center' if c not in ('Name', 'Winner') else 'w')
+
+        style = ttk.Style()
+        style.configure('Treeview', background=LOG_BG, foreground=TEXT,
+                        fieldbackground=LOG_BG, borderwidth=0, rowheight=28)
+        style.configure('Treeview.Heading', background=BTN_BG,
+                        foreground=TEXT, font=('Segoe UI', 8, 'bold'))
+        style.map('Treeview', background=[('selected', ACCENT)])
+
+        self.tree.tag_configure('running',  foreground="#00FF80",
+                                background="#001208")
+        self.tree.tag_configure('finished', foreground="#FFD700")
+        self.tree.tag_configure('pending',  foreground="#555555")
+
+        self.tree.pack(fill='both', expand=True)
+        self.tree.bind('<Double-1>', lambda _: self._open_selected())
+        self.tree.bind('<Return>',   lambda _: self._open_selected())
+
+    def _build_status_bar(self):
+        self._summary_var = tk.StringVar(value="")
+        sf = tk.Frame(self.win, bg=PANEL_BG,
+                      highlightthickness=1, highlightbackground="#222")
+        sf.pack(fill='x', side='bottom')
+        tk.Label(sf, textvariable=self._summary_var,
+                 bg=PANEL_BG, fg="#555",
+                 font=('Consolas', 8), anchor='w',
+                 padx=10, pady=4).pack(side='left')
+
+    # ── Data helpers ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _t_status(t: Tournament) -> str:
+        if t.finished: return "Finished"
+        if t.started:  return "Running"
+        return "Pending"
+
+    @staticmethod
+    def _games_played(t: Tournament) -> int:
+        return len(t.get_all_completed_games())
+
+    # ── Populate ──────────────────────────────────────────────────────────────
+
+    def _refresh(self, *_):
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+        self._id_map.clear()
+
+        flt     = self._filter_var.get().strip().lower()
+        fmt_flt = self._fmt_filter.get()
+        st_flt  = self._status_filter.get()
+
+        # ── 1. In-memory tournaments (current session) ────────────────────
+        entries = self.manager.get_all()
+        in_memory_ids = {e["id"] for e in entries}
+
+        # ── 2. Database tournaments (past sessions) ───────────────────────
+        db_rows = []
+        if self.db is not None:
+            try:
+                db_rows = self.db.get_tournament_list()
+            except Exception as e:
+                print(f"[TournamentListWindow] DB load error: {e}")
+
+        # Merge: DB records + in-memory (in-memory wins on conflict)
+        display_rows = []
+
+        for entry in entries:
+            t: Tournament = entry["obj"]
+            status   = self._t_status(t)
+            games    = self._games_played(t)
+            winner   = t.winner.name if t.winner else "—"
+            display_rows.append({
+                "id":      entry["id"],
+                "name":    entry["name"],
+                "format":  entry["format"],
+                "players": entry["players"],
+                "rounds":  entry["rounds"],
+                "games":   games,
+                "status":  status,
+                "winner":  winner,
+                "created": entry["created"],
+                "obj":     t,
+            })
+
+        for row in db_rows:
+            tid = row.get("tournament_id", "")
+            if tid in in_memory_ids:
+                continue  # already shown via live entry
+            display_rows.append({
+                "id":      tid,
+                "name":    row.get("tournament_name", "Unknown"),
+                "format":  row.get("format", "—"),
+                "players": "—",
+                "rounds":  "—",
+                "games":   row.get("game_count", 0),
+                "status":  "Finished",
+                "winner":  "—",
+                "created": row.get("date", "—"),
+                "obj":     None,
+            })
+
+        shown = 0
+        for i, d in enumerate(display_rows, 1):
+            status = d["status"]
+
+            if flt and flt not in d["name"].lower() \
+                    and flt not in d["winner"].lower():
+                continue
+            if fmt_flt != "All" and d["format"] != fmt_flt:
+                continue
+            if st_flt != "All" and status != st_flt:
+                continue
+
+            row_vals = [
+                i,
+                d["name"],
+                d["format"],
+                d["players"],
+                d["rounds"],
+                d["games"],
+                status,
+                d["winner"],
+                d["created"],
+            ]
+
+            if   status == "Running":  tag = 'running'
+            elif status == "Finished": tag = 'finished'
+            else:                      tag = 'pending'
+
+            iid = self.tree.insert('', 'end', values=row_vals, tags=(tag,))
+            self._id_map[iid] = d["id"]
+            shown += 1
+
+        total     = len(display_rows)
+        finished  = sum(1 for d in display_rows if d["status"] == "Finished")
+        running   = sum(1 for d in display_rows if d["status"] == "Running")
+        all_games = sum(
+            d["games"] if isinstance(d["games"], int) else 0
+            for d in display_rows
+        )
+
+        self._summary_var.set(
+            f"  Showing {shown} / {total} tournaments  ·  "
+            f"{running} running  ·  {finished} finished  ·  "
+            f"{all_games} total games played"
+        )
+
+    # ── Sorting ───────────────────────────────────────────────────────────────
+
+    def _sort_by(self, col: str):
+        if self._sort_col == col:
+            self._sort_rev = not self._sort_rev
+        else:
+            self._sort_col = col
+            self._sort_rev = False
+        rows = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
+        try:
+            rows.sort(key=lambda x: int(x[0]), reverse=self._sort_rev)
+        except ValueError:
+            rows.sort(key=lambda x: x[0].lower(), reverse=self._sort_rev)
+        for idx, (_, k) in enumerate(rows):
+            self.tree.move(k, '', idx)
+
+    # ── Selection helpers ─────────────────────────────────────────────────────
+
+    def _selected_tournament(self) -> "Tournament | None":
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        tid = self._id_map.get(sel[0])
+        if tid is None:
+            return None
+        for e in self.manager.get_all():
+            if e["id"] == tid:
+                return e["obj"]
+        return None
+
+    # ── Actions ───────────────────────────────────────────────────────────────
+
+    def _open_selected(self):
+        t = self._selected_tournament()
+        if t is None:
+            # Try to load from DB (past session tournament)
+            sel = self.tree.selection()
+            if not sel:
+                messagebox.showinfo("No selection",
+                                    "Please select a tournament first.",
+                                    parent=self.win)
+                return
+            tid = self._id_map.get(sel[0])
+            if tid:
+                self._open_db_tournament(tid)
+            return
+
+        existing = self.manager.get_window(t.tournament_id)
+        if existing is not None:
+            try:
+                if existing.win.winfo_exists():
+                    existing.win.lift()
+                    existing.win.focus_force()
+                    return
+            except Exception:
+                pass
+
+        win = TournamentWindow(self.root, t, db=self.db, db_path=self.db_path)
+        self.manager.set_window(t.tournament_id, win)
+
+
+
+
+
+    def _open_db_tournament(self, tournament_id: str):
+        """Reconstruct and open a completed tournament from DB records."""
+        if self.db is None:
+            messagebox.showinfo("No Database",
+                                "No database connected — cannot load past tournament.",
+                                parent=self.win)
+            return
+
+        try:
+            rows = self.db.get_tournament_games(tournament_id=tournament_id)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load tournament:\n{e}",
+                                parent=self.win)
+            return
+
+        if not rows:
+            messagebox.showinfo("Empty",
+                                "No games found for this tournament in the database.",
+                                parent=self.win)
+            return
+
+        # ── Reconstruct Tournament object from DB rows ────────────────────
+        first       = rows[0]
+        t_name      = first.get("tournament_name", "Unknown Tournament")
+        t_fmt       = first.get("format", Tournament.FORMAT_SWISS)
+        t_id        = first.get("tournament_id", tournament_id)
+
+        # Collect unique players
+        player_names = {}
+        for row in rows:
+            for key in ("white_engine", "black_engine"):
+                name = row.get(key, "")
+                if name and name not in player_names:
+                    player_names[name] = TournamentPlayer(name, "")
+
+        players = list(player_names.values())
+
+        t = Tournament(
+            name        = t_name,
+            fmt         = t_fmt,
+            players     = players,
+            rounds      = max((r.get("round_num", 1) for r in rows), default=1),
+            movetime_ms = 1000,
+        )
+        t.tournament_id = t_id
+        t.started       = True
+        t.finished      = True
+
+        # ── Rebuild TournamentGame objects ────────────────────────────────
+        from board import Board as _Board
+
+        for row in rows:
+            wname = row.get("white_engine", "")
+            bname = row.get("black_engine", "")
+            wp    = player_names.get(wname)
+            bp    = player_names.get(bname)
+            if wp is None or bp is None:
+                continue
+
+            rnum = row.get("round_num", 1)
+            g    = TournamentGame(rnum, wp, bp)
+            g.result     = row.get("result", "*")
+            g.reason     = row.get("reason", "")
+            g.pgn        = row.get("pgn", "")
+            g.move_count = row.get("move_count") or 0
+            g.duration   = row.get("duration_sec") or 0
+            g.opening    = row.get("opening", "")
+            g.status     = "done"
+
+            # Replay PGN to rebuild move_history
+            if g.pgn:
+                try:
+                    b = _Board()
+                    import re
+                    # Strip PGN headers
+                    body = re.sub(r'\[.*?\]\s*', '', g.pgn, flags=re.DOTALL)
+                    # Remove move numbers and result tokens
+                    body = re.sub(r'\d+\.+', '', body)
+                    body = re.sub(r'1-0|0-1|1/2-1/2|\*', '', body)
+                    tokens = body.split()
+                    for san in tokens:
+                        san = san.strip()
+                        if not san:
+                            continue
+                        # Find matching legal move
+                        try:
+                            legal = b.legal_moves()
+                            matched = False
+                            for move in legal:
+                                fr, fc, tr, tc, promo = move
+                                candidate_san = b._build_san(fr, fc, tr, tc, promo, legal)
+                                if candidate_san.rstrip('+#') == san.rstrip('+#'):
+                                    uci = (f"{chr(ord('a')+fc)}{8-fr}"
+                                        f"{chr(ord('a')+tc)}{8-tr}"
+                                        + (promo.lower() if promo else ""))
+                                    b.apply_uci(uci)
+                                    matched = True
+                                    break
+                            if not matched:
+                                break
+                        except Exception:
+                            break
+                    g.move_history = list(b.move_history)
+                except Exception:
+                    g.move_history = []
+
+            # Update player records
+            ws = g.white_score
+            bs = g.black_score
+            if ws is not None:
+                wp.record(ws, bname, 'w')
+                bp.record(bs, wname, 'b')
+
+            t.all_games.append(g)
+            t.round_games = [gg for gg in t.all_games
+                            if gg.round_num == t.current_round]
+
+        # Set current_round to max round seen
+        if t.all_games:
+            t.current_round = max(g.round_num for g in t.all_games)
+
+        # Determine winner from standings
+        standings = t.get_standings()
+        if standings:
+            t.winner = standings[0]
+
+        # ── Open the window ───────────────────────────────────────────────
+        win = TournamentWindow(self.root, t, db=self.db, db_path=self.db_path)
+        self.manager.register(t, win)
+        self._refresh()
+
+    def _open_history(self):
+        t = self._selected_tournament()
+        if t is None:
+            messagebox.showinfo("No selection",
+                                "Please select a tournament first.",
+                                parent=self.win)
+            return
+        TournamentHistoryWindow(self.win, t)
+
+    def _new_tournament(self):
+        """Open setup dialog, create tournament, register in manager, open window."""
+        resolved_db = self.db
+        if resolved_db is None and self.db_path is not None and Database is not None:
+            resolved_db = Database(self.db_path)
+
+        setup = TournamentSetupDialog(
+            self.root,
+            attached_analyzer    =self.analyzer,
+            attached_opening_book=self.opening_book,
+        )
+        t = setup.show()
+        if t is None:
+            return
+
+        win = TournamentWindow(self.root, t, db=resolved_db, db_path=self.db_path)
+
+        # Patch callbacks so the list updates as games/rounds finish
+        _orig_start = win._cb_game_start
+        _orig_round = win._cb_round_end
+        _orig_end   = win._cb_tournament_end
+
+        def _p_start(game):
+            self.manager.update(t)
+            if self.win.winfo_exists():
+                self.win.after(0, self._refresh)
+            _orig_start(game)
+
+        def _p_round(rnd):
+            self.manager.update(t)
+            if self.win.winfo_exists():
+                self.win.after(0, self._refresh)
+            _orig_round(rnd)
+
+        def _p_end(tournament):
+            self.manager.update(t)
+            if self.win.winfo_exists():
+                self.win.after(0, self._refresh)
+            _orig_end(tournament)
+
+        win._cb_game_start     = _p_start
+        win._cb_round_end      = _p_round
+        win._cb_tournament_end = _p_end
+
+        self.manager.register(t, win)
+        self._refresh()
+
+    def _export_all_pgn(self):
+        all_games = []
+        for entry in self.manager.get_all():
+            all_games.extend(entry["obj"].get_all_completed_games())
+
+        if not all_games:
+            messagebox.showinfo("Export PGN",
+                                "No completed games found across all tournaments.",
+                                parent=self.win)
+            return
+
+        path = filedialog.asksaveasfilename(
+            parent=self.win,
+            title="Export All Games",
+            defaultextension=".pgn",
+            filetypes=[("PGN files", "*.pgn"), ("All", "*.*")],
+            initialfile=f"all_tournaments_{datetime.now().strftime('%Y%m%d_%H%M')}.pgn")
+        if not path:
+            return
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                for g in all_games:
+                    if g.pgn:
+                        f.write(g.pgn + "\n\n")
+            n_t = len(self.manager.get_all())
+            messagebox.showinfo(
+                "Export PGN",
+                f"Exported {len(all_games)} games from {n_t} tournament(s):\n{path}",
+                parent=self.win)
+        except Exception as e:
+            messagebox.showerror("Export failed", str(e), parent=self.win)
+
+    # ── Polling ───────────────────────────────────────────────────────────────
+
+    def _poll(self):
+        """Auto-refresh every 3 s to pick up live progress from running tournaments."""
+        if not self.win.winfo_exists():
+            return
+        self._refresh()
+        self.win.after(3000, self._poll)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Module-level default manager (so callers that ignore the manager arg still work)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_default_manager = TournamentManager()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Entry points
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def open_tournament(root, db=None, db_path=None, analyzer=None,
+                    opening_book=None,
+                    manager: TournamentManager = None) -> "TournamentWindow | None":
     """
     Show the tournament setup dialog and open the tournament window.
 
     Parameters
     ----------
     root          : tk root / parent window
-    db_path       : optional SQLite path for game logging
-    analyzer      : the AnalyzerEngine instance (or path string) already
-                    running in ChessGUI — loaded at startup by LoadingScreen.
-                    Pass  self.analyzer_engine  or  self.analyzer_path.
-    opening_book  : the OpeningBook object already loaded in ChessGUI.
-                    Pass  self.opening_book.
-
-    Usage in ChessGUI
-    -----------------
-        from tournament_module import open_tournament
-
-        # Minimal (no resources attached)
-        open_tournament(self.root, db_path=self.db_path)
-
-        # Full (resources auto-attached from LoadingScreen)
-        open_tournament(
-            self.root,
-            db_path      = self.db_path,
-            analyzer     = self.analyzer_engine,   # live AnalyzerEngine object
-            opening_book = self.opening_book,       # OpeningBook object
-        )
-
-    How it works
-    ------------
-    LoadingScreen already starts the AnalyzerEngine and loads the OpeningBook
-    before ChessGUI is created.  ChessGUI stores them as:
-        self.analyzer_engine  (AnalyzerEngine object)
-        self.opening_book     (OpeningBook object)
-
-    open_tournament() forwards them into TournamentSetupDialog which shows a
-    green ✓ in the "Attached from GUI" panel — the user does not need to
-    browse for them manually.
-
-    TournamentRunner detects that analyzer is a live object (not a path
-    string) and reuses it WITHOUT stopping it when the tournament ends,
-    so the main GUI analyzer keeps working normally.
+    db            : Database instance (preferred)
+    db_path       : str | None — fallback if db is None
+    analyzer      : AnalyzerEngine instance or path string
+    opening_book  : OpeningBook object
+    manager       : TournamentManager — pass a shared instance so the list
+                    window stays in sync; uses module-level default if omitted.
     """
+    if manager is None:
+        manager = _default_manager
+
+    resolved_db = db
+    if resolved_db is None and db_path is not None and Database is not None:
+        resolved_db = Database(db_path)
+
     setup = TournamentSetupDialog(
         root,
-        attached_analyzer    = analyzer,
-        attached_opening_book= opening_book,
+        attached_analyzer    =analyzer,
+        attached_opening_book=opening_book,
     )
     t = setup.show()
     if t is None:
         return None
-    return TournamentWindow(root, t, db_path=db_path)
+
+    win = TournamentWindow(root, t, db=resolved_db, db_path=db_path)
+
+    # Patch callbacks so the manager stays up to date
+    _orig_start = win._cb_game_start
+    _orig_round = win._cb_round_end
+    _orig_end   = win._cb_tournament_end
+
+    def _p_start(game):
+        manager.update(t)
+        _orig_start(game)
+
+    def _p_round(rnd):
+        manager.update(t)
+        _orig_round(rnd)
+
+    def _p_end(tournament):
+        manager.update(t)
+        _orig_end(tournament)
+
+    win._cb_game_start     = _p_start
+    win._cb_round_end      = _p_round
+    win._cb_tournament_end = _p_end
+
+    manager.register(t, win)
+    return win
+
+
+def open_tournament_list(root, db=None, db_path=None,
+                         analyzer=None, opening_book=None,
+                         manager: TournamentManager = None) -> TournamentListWindow:
+    """
+    Open (or reuse) the Tournament List window.
+
+    This is the recommended primary entry point for the tournament system.
+    The list window has its own "New Tournament" button; individual tournament
+    windows can still be opened directly via open_tournament().
+
+    Parameters
+    ----------
+    root          : tk root / parent window
+    db / db_path  : database connection / path
+    analyzer      : AnalyzerEngine instance or path
+    opening_book  : OpeningBook object
+    manager       : TournamentManager; uses module-level default if omitted.
+    """
+    if manager is None:
+        manager = _default_manager
+
+    return TournamentListWindow(
+        root,
+        manager      =manager,
+        db           =db,
+        db_path      =db_path,
+        analyzer     =analyzer,
+        opening_book =opening_book,
+    )

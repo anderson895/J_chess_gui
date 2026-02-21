@@ -27,6 +27,26 @@ def _apply_tree_style():
     style.map('Treeview.Heading', background=[('active', ACCENT)])
 
 
+def _unpack_game_row(game):
+    """
+    Safely unpack a game row returned by Database.get_all_games().
+
+    Supports both the legacy 9-column schema and the new 10-column schema
+    that includes a 'source' column at the end.
+
+    Returns
+    -------
+    tuple: (game_id, white, black, result, reason, date, time_str,
+            moves, duration, source)
+    """
+    if len(game) >= 10:
+        game_id, white, black, result, reason, date, time_str, moves, duration, source = game[:10]
+    else:
+        game_id, white, black, result, reason, date, time_str, moves, duration = game[:9]
+        source = 'regular'
+    return game_id, white, black, result, reason, date, time_str, moves, duration, source
+
+
 # ═══════════════════════════════════════════════════════════
 #  Rankings window
 # ═══════════════════════════════════════════════════════════
@@ -487,7 +507,7 @@ def show_game_history(root, db, filter_engine=None, opening_book=None):
     win = tk.Toplevel(root)
     win.title(f"Game History{' — ' + norm_filter if norm_filter else ''}")
     win.configure(bg=BG)
-    win.geometry("960x640")
+    win.geometry("1000x640")
 
     header_frame = tk.Frame(win, bg=BG)
     header_frame.pack(fill='x', padx=20, pady=(12, 0))
@@ -497,39 +517,72 @@ def show_game_history(root, db, filter_engine=None, opening_book=None):
         tk.Label(header_frame, text=f"  ·  {norm_filter}", bg=BG, fg="#FFD700",
                  font=('Segoe UI', 11)).pack(side='left')
         tk.Button(header_frame, text="✕ Clear Filter",
-                  command=lambda: [win.destroy(), show_game_history(root, db, opening_book=opening_book)],
+                  command=lambda: [win.destroy(),
+                                   show_game_history(root, db, opening_book=opening_book)],
                   bg=BTN_BG, fg=TEXT, font=('Segoe UI', 9), padx=10, pady=4,
                   cursor='hand2', relief='flat').pack(side='right')
 
+    # ── Source filter row ─────────────────────────────────
+    filter_row = tk.Frame(win, bg=BG)
+    filter_row.pack(fill='x', padx=20, pady=(4, 0))
+    tk.Label(filter_row, text="Show:", bg=BG, fg="#888",
+             font=('Segoe UI', 8)).pack(side='left')
+    source_filter_var = tk.StringVar(value='all')
+    for val, lbl in [('all', 'All Games'), ('regular', '🎮 Regular'), ('tournament', '🏆 Tournament')]:
+        tk.Radiobutton(filter_row, text=lbl, variable=source_filter_var,
+                       value=val, bg=BG, fg="#AAA",
+                       selectcolor=BTN_BG, activebackground=BG,
+                       font=('Segoe UI', 8),
+                       command=lambda: refresh_history('')
+                       ).pack(side='left', padx=6)
+
     search_container = tk.Frame(win, bg=BG)
-    search_container.pack(fill='x', padx=20, pady=(8, 4))
+    search_container.pack(fill='x', padx=20, pady=(4, 4))
 
     all_games_cache = [None]
     tree_ref2       = [None]
     count_lbl2      = [None]
 
     def refresh_history(query=''):
-        games = db.get_all_games(filter_engine=filter_engine, search_query=query)
+        src = source_filter_var.get()
+        source_arg = src if src != 'all' else None
+        games = db.get_all_games(
+            filter_engine=filter_engine,
+            search_query=query,
+            source_filter=source_arg,
+        )
         all_games_cache[0] = games
         tree = tree_ref2[0]
         if tree is None: return
         for row in tree.get_children():
             tree.delete(row)
+
         for game in games:
-            game_id, white, black, result, reason, date, time_str, moves, duration = game
+            # ── Use helper to safely unpack regardless of column count ──
+            (game_id, white, black, result, reason,
+             date, time_str, moves, duration, source) = _unpack_game_row(game)
+
             duration_str = f"{duration//60}m {duration%60}s" if duration else "N/A"
+
+            # Source badge shown in the Reason column prefix
+            src_badge = "🏆 " if source == 'tournament' else ""
+
             if result == '1/2-1/2':
                 tag = 'draw'
             elif result == '1-0':
-                tag = 'loss' if (norm_filter and normalize_engine_name(black) == norm_filter) else 'white_win'
+                tag = 'loss' if (norm_filter and normalize_engine_name(black) == norm_filter) \
+                      else 'white_win'
             elif result == '0-1':
-                tag = 'loss' if (norm_filter and normalize_engine_name(white) == norm_filter) else 'black_win'
+                tag = 'loss' if (norm_filter and normalize_engine_name(white) == norm_filter) \
+                      else 'black_win'
             else:
                 tag = ''
+
             tree.insert('', 'end',
                         values=(game_id, date, time_str, white, black,
-                                result, reason, moves or 0, duration_str),
+                                result, f"{src_badge}{reason}", moves or 0, duration_str),
                         tags=(tag,))
+
         if count_lbl2[0]:
             count_lbl2[0].config(text=f"{len(games)} game(s) shown")
 
@@ -552,7 +605,7 @@ def show_game_history(root, db, filter_engine=None, opening_book=None):
     _apply_tree_style()
 
     for col, w in [('ID', 40), ('Date', 80), ('Time', 70), ('White', 150),
-                   ('Black', 150), ('Result', 60), ('Reason', 150),
+                   ('Black', 150), ('Result', 60), ('Reason', 170),
                    ('Moves', 50), ('Duration', 80)]:
         anchor = 'center' if col not in ('White', 'Black', 'Reason') else 'w'
         tree.heading(col, text=col)
@@ -567,14 +620,14 @@ def show_game_history(root, db, filter_engine=None, opening_book=None):
     count_lbl2[0] = tk.Label(win, text="", bg=BG, fg="#555", font=('Segoe UI', 9))
     count_lbl2[0].pack(pady=(2, 0))
     tk.Label(win,
-             text="💡 Double-click row to view PGN  |  Click White/Black cell to filter by engine",
+             text="💡 Double-click row to view PGN  |  Click White/Black cell to filter by engine  |  🏆 = Tournament game",
              bg=BG, fg="#444", font=('Segoe UI', 8)).pack(pady=(0, 4))
 
     def _on_tree_click(event, double=False):
         region = tree.identify_region(event.x, event.y)
         if region != 'cell': return
-        col_id  = tree.identify_column(event.x)
-        row_id  = tree.identify_row(event.y)
+        col_id    = tree.identify_column(event.x)
+        row_id    = tree.identify_row(event.y)
         if not row_id: return
         col_index = int(col_id.replace('#', '')) - 1
         values    = tree.item(row_id)['values']
@@ -588,10 +641,12 @@ def show_game_history(root, db, filter_engine=None, opening_book=None):
         else:
             if col_index == 3:
                 win.destroy()
-                show_game_history(root, db, filter_engine=values[3], opening_book=opening_book)
+                show_game_history(root, db, filter_engine=values[3],
+                                  opening_book=opening_book)
             elif col_index == 4:
                 win.destroy()
-                show_game_history(root, db, filter_engine=values[4], opening_book=opening_book)
+                show_game_history(root, db, filter_engine=values[4],
+                                  opening_book=opening_book)
 
     tree.bind('<Button-1>', lambda e: _on_tree_click(e, double=False))
     tree.bind('<Double-1>', lambda e: _on_tree_click(e, double=True))
@@ -612,10 +667,12 @@ def show_game_history(root, db, filter_engine=None, opening_book=None):
             messagebox.showerror("Error", "Could not load PGN.")
 
     tk.Button(btn_frame, text="View PGN", command=view_pgn, bg=ACCENT, fg=TEXT,
-              font=('Segoe UI', 10, 'bold'), padx=15, pady=8, cursor='hand2').pack(side='left', padx=5)
+              font=('Segoe UI', 10, 'bold'), padx=15, pady=8,
+              cursor='hand2').pack(side='left', padx=5)
     if norm_filter:
         tk.Button(btn_frame, text="Show All Games",
-                  command=lambda: [win.destroy(), show_game_history(root, db, opening_book=opening_book)],
+                  command=lambda: [win.destroy(),
+                                   show_game_history(root, db, opening_book=opening_book)],
                   bg=BTN_BG, fg=TEXT, font=('Segoe UI', 10), padx=15, pady=8,
                   cursor='hand2').pack(side='left', padx=5)
     tk.Button(btn_frame, text="Refresh",
@@ -684,20 +741,23 @@ def show_pgn_viewer(root, db, pgn, game_info, all_games, opening_book=None):
     win.geometry("1000x700")
 
     current_game_id = game_info[0]
-    current_index   = next((i for i, g in enumerate(all_games) if g[0] == current_game_id), None)
+    current_index   = next((i for i, g in enumerate(all_games)
+                            if _unpack_game_row(g)[0] == current_game_id), None)
 
     def load_game(direction):
         if current_index is None: return
         new_index = current_index + direction
         if 0 <= new_index < len(all_games):
             game    = all_games[new_index]
-            new_pgn = db.get_game_pgn(game[0])
+            new_pgn = db.get_game_pgn(_unpack_game_row(game)[0])
             if new_pgn:
                 win.destroy()
-                gid, white, black, result, reason, date, time_str, moves, duration = game
+                (gid, white, black, result, reason,
+                 date, time_str, moves, duration, source) = _unpack_game_row(game)
                 duration_str = f"{duration//60}m {duration%60}s" if duration else "N/A"
                 show_pgn_viewer(root, db, new_pgn,
-                                (gid, date, time_str, white, black, result, reason, moves, duration_str),
+                                (gid, date, time_str, white, black,
+                                 result, reason, moves, duration_str),
                                 all_games, opening_book=opening_book)
 
     # ── Navigation header ─────────────────────────────────
@@ -720,7 +780,8 @@ def show_pgn_viewer(root, db, pgn, game_info, all_games, opening_book=None):
               command=lambda: load_game(1),
               bg=BTN_BG, fg=TEXT, font=('Segoe UI', 9, 'bold'),
               padx=10, pady=5, cursor='hand2', relief='flat',
-              state='normal' if current_index is not None and current_index < len(all_games) - 1 else 'disabled'
+              state='normal' if current_index is not None
+                    and current_index < len(all_games) - 1 else 'disabled'
               ).pack(side='right', padx=5)
 
     # ── Left column: board + controls ─────────────────────

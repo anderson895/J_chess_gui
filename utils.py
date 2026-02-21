@@ -13,7 +13,7 @@ def valid(r, c):
 
 def normalize_engine_name(name):
     """Strip color suffixes so the same engine is always one record."""
-    for suffix in [' (White)', ' (Black)', ' (white)', ' (black)',
+    for suffix in [' (White)', ' (Black)', ' (white)', ' (black)',  
                    '(White)', '(Black)', '(white)', '(black)']:
         if name.endswith(suffix):
             name = name[:-len(suffix)].strip()

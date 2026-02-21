@@ -118,6 +118,9 @@ class ChessGUI:
 
         # ── Database ──────────────────────────────────────
         self.db = Database()
+        # ── Tournament manager ────────────────────────────
+        from tournament import TournamentManager
+        self._tournament_manager = TournamentManager()
 
         # ── Build UI ──────────────────────────────────────
         self._build_ui()
@@ -343,20 +346,19 @@ class ChessGUI:
                           filter_engine=filter_engine,
                           opening_book=self.opening_book)
 
-    def _tournament(self):
-        """Open the tournament setup dialog, passing the GUI's preloaded
-        analyzer engine and opening book so they are auto-attached."""
+    def _tournament_list(self):
+        """Open the Tournament List overview window."""
         try:
-            from tournament_module import open_tournament
-            open_tournament(
+            from tournament import open_tournament_list
+            open_tournament_list(
                 self.root,
-                db_path      = self.db.db_path,
-                analyzer     = self.analyzer,        # live AnalyzerEngine from LoadingScreen
-                opening_book = self.opening_book,    # OpeningBook from LoadingScreen
+                db           = self.db,
+                analyzer     = self.analyzer,
+                opening_book = self.opening_book,
+                manager      = self._tournament_manager,
             )
         except ImportError:
-            messagebox.showinfo("Tournament",
-                "tournament_module.py not found in the same directory.")
+            messagebox.showinfo("Tournament", "tournament.py not found.")
 
     # ═══════════════════════════════════════════════════════
     #  UI builders
@@ -447,15 +449,15 @@ class ChessGUI:
 
         tk.Frame(p, bg='#2a2a4a', height=1).pack(fill='x', padx=10, pady=6)
         for txt, cmd, acc in [
-            ("▶  START GAME",      self._start_game,       True),
-            ("⏸  PAUSE / RESUME",  self._toggle_pause,     False),
-            ("⏹  STOP GAME",       self._stop_game,        False),
-            ("↺  NEW GAME",        self._new_game,         False),
-            ("⇅  FLIP BOARD",      self._flip_board,       False),
-            ("💾  EXPORT PGN",     self._export_pgn,       False),
-            ("🏆  RANKINGS",       self._show_rankings,    False),
-            ("🏆  TOURNAMENT",     self._tournament,       False),
-            ("📊  STATISTICS",     self._show_statistics,  False),
+            ("▶  START GAME",        self._start_game,       True),
+            ("⏸  PAUSE / RESUME",    self._toggle_pause,     False),
+            ("⏹  STOP GAME",         self._stop_game,        False),
+            ("↺  NEW GAME",          self._new_game,         False),
+            ("⇅  FLIP BOARD",        self._flip_board,       False),
+            ("💾  EXPORT PGN",       self._export_pgn,       False),
+            ("🏆  RANKINGS",         self._show_rankings,    False),
+            ("📋  TOURNAMENTS",  self._tournament_list,  False),   # ← new
+            ("📊  STATISTICS",       self._show_statistics,  False),
         ]:
             self._btn(p, txt, cmd, accent=acc).pack(fill='x', padx=10, pady=2)
 

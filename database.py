@@ -1,6 +1,6 @@
-# ═══════════════════════════════════════════════════════════
-#  database.py — SQLite persistence layer
-# ═══════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+#  database.py — SQLite persistence layer  (FIXED)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 import sqlite3
 from datetime import datetime
@@ -23,10 +23,12 @@ class Database:
     # ── Schema ────────────────────────────────────────────
 
     def _init_schema(self):
-        """Create the games table if it does not exist yet."""
+        """Create the games and tournament_games tables if they do not exist yet."""
         conn = sqlite3.connect(self.db_path)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+
+        # Main games table (regular + tournament games)
         conn.execute('''
             CREATE TABLE IF NOT EXISTS games (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,29 +40,47 @@ class Database:
                 time              TEXT    NOT NULL,
                 pgn               TEXT    NOT NULL,
                 move_count        INTEGER,
-                duration_seconds  INTEGER
+                duration_seconds  INTEGER,
+                source            TEXT    DEFAULT 'regular'
             )
         ''')
+
+        # Tournament-specific metadata table
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS tournament_games (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_id         INTEGER REFERENCES games(id) ON DELETE CASCADE,
+                tournament_id   TEXT    NOT NULL,
+                tournament_name TEXT    NOT NULL,
+                format          TEXT    NOT NULL,
+                round_num       INTEGER NOT NULL,
+                white_engine    TEXT    NOT NULL,
+                black_engine    TEXT    NOT NULL,
+                result          TEXT    NOT NULL,
+                reason          TEXT    NOT NULL,
+                pgn             TEXT    NOT NULL,
+                move_count      INTEGER,
+                duration_sec    INTEGER,
+                opening         TEXT,
+                date            TEXT    NOT NULL,
+                time            TEXT    NOT NULL
+            )
+        ''')
+
+        # Add 'source' column to existing games table if missing (migration)
+        try:
+            conn.execute("ALTER TABLE games ADD COLUMN source TEXT DEFAULT 'regular'")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
         conn.commit()
         conn.close()
 
     # ── Write ─────────────────────────────────────────────
 
     def save_game(self, white_name, black_name, result, reason,
-                  pgn, move_count, duration_sec):
-        """
-        Persist one completed game to the database.
-
-        Parameters
-        ----------
-        white_name : str
-        black_name : str
-        result     : str  e.g. "1-0", "0-1", "1/2-1/2", "*"
-        reason     : str  e.g. "Checkmate"
-        pgn        : str  full PGN text
-        move_count : int  total half-moves (plies)
-        duration_sec : int  game duration in seconds
-        """
+                  pgn, move_count, duration_sec, source='regular'):
+        """Save a game to the games table. Returns the new row id, or None on error."""
         try:
             conn   = sqlite3.connect(self.db_path)
             conn.execute("PRAGMA journal_mode=WAL")
@@ -70,30 +90,85 @@ class Database:
             cursor.execute('''
                 INSERT INTO games
                     (white_engine, black_engine, result, reason,
-                     date, time, pgn, move_count, duration_seconds)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     date, time, pgn, move_count, duration_seconds, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 normalize_engine_name(white_name),
                 normalize_engine_name(black_name),
                 result, reason,
                 date_str, time_str,
                 pgn, move_count, duration_sec,
+                source,
             ))
             conn.commit()
+            game_id = cursor.lastrowid
             conn.close()
+            return game_id
         except Exception as e:
             print(f"[Database] save_game error: {e}")
+            return None
+
+    def save_tournament_game(self, tournament_id, tournament_name, fmt,
+                             round_num, white_name, black_name, result,
+                             reason, pgn, move_count, duration_sec,
+                             opening=None):
+        try:
+            # 1. Save to main games table so Elo / stats pick it up
+            game_id = self.save_game(
+                white_name   = white_name,
+                black_name   = black_name,
+                result       = result,
+                reason       = reason,
+                pgn          = pgn,
+                move_count   = move_count,
+                duration_sec = duration_sec,
+                source       = 'tournament',
+            )
+            if game_id is None:
+                return None, None
+
+            # 2. Save tournament metadata
+            conn   = sqlite3.connect(self.db_path)
+            conn.execute("PRAGMA journal_mode=WAL")
+            cursor = conn.cursor()
+            now      = datetime.now()
+            date_str = now.strftime("%Y.%m.%d")
+            time_str = now.strftime("%H:%M:%S")
+            cursor.execute('''
+                INSERT INTO tournament_games
+                    (game_id, tournament_id, tournament_name, format,
+                     round_num, white_engine, black_engine, result, reason,
+                     pgn, move_count, duration_sec, opening, date, time)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                game_id,
+                tournament_id,
+                tournament_name,
+                fmt,
+                round_num,
+                normalize_engine_name(white_name),
+                normalize_engine_name(black_name),
+                result,
+                reason,
+                pgn,
+                move_count,
+                duration_sec,
+                opening or '',
+                date_str,
+                time_str,
+            ))
+            conn.commit()
+            t_game_id = cursor.lastrowid
+            conn.close()
+            return game_id, t_game_id
+
+        except Exception as e:
+            print(f"[Database] save_tournament_game error: {e}")
+            return None, None
 
     # ── Read ──────────────────────────────────────────────
 
     def get_all_games_for_elo(self):
-        """
-        Return all games ordered oldest-first, for Elo computation.
-
-        Returns
-        -------
-        list of (white_engine, black_engine, result) tuples
-        """
         try:
             conn   = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -108,19 +183,6 @@ class Database:
             return []
 
     def get_engine_stats(self, search_query=''):
-        """
-        Aggregate win / draw / loss stats per engine.
-
-        Parameters
-        ----------
-        search_query : str
-            Optional substring filter applied to engine names.
-
-        Returns
-        -------
-        list of dicts with keys:
-            engine, matches, wins, draws, loses, win_rate
-        """
         try:
             conn   = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -180,42 +242,35 @@ class Database:
             print(f"[Database] get_engine_stats error: {e}")
             return []
 
-    def get_all_games(self, filter_engine=None, search_query=''):
-        """
-        Fetch game rows for the history window.
-
-        Parameters
-        ----------
-        filter_engine : str | None
-            If set, only games involving this engine are returned.
-        search_query : str
-            Optional full-text substring filter.
-
-        Returns
-        -------
-        list of tuples:
-            (id, white_engine, black_engine, result, reason,
-             date, time, move_count, duration_seconds)
-        """
+    def get_all_games(self, filter_engine=None, search_query='',
+                      source_filter=None):
         try:
             conn   = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
 
+            base_query = '''
+                SELECT id, white_engine, black_engine, result, reason,
+                       date, time, move_count, duration_seconds,
+                       COALESCE(source, 'regular') as source
+                FROM games
+            '''
+            params = []
+            conditions = []
+
             if filter_engine:
                 norm = normalize_engine_name(filter_engine)
-                cursor.execute(
-                    '''SELECT id, white_engine, black_engine, result, reason,
-                              date, time, move_count, duration_seconds
-                       FROM games
-                       WHERE white_engine = ? OR black_engine = ?
-                       ORDER BY id DESC''',
-                    (norm, norm))
-            else:
-                cursor.execute(
-                    '''SELECT id, white_engine, black_engine, result, reason,
-                              date, time, move_count, duration_seconds
-                       FROM games ORDER BY id DESC''')
+                conditions.append('(white_engine = ? OR black_engine = ?)')
+                params.extend([norm, norm])
 
+            if source_filter:
+                conditions.append('source = ?')
+                params.append(source_filter)
+
+            if conditions:
+                base_query += ' WHERE ' + ' AND '.join(conditions)
+
+            base_query += ' ORDER BY id DESC'
+            cursor.execute(base_query, params)
             games = cursor.fetchall()
             conn.close()
 
@@ -246,3 +301,78 @@ class Database:
         except Exception as e:
             print(f"[Database] get_game_pgn error: {e}")
             return None
+
+    def get_tournament_games(self, tournament_id=None, tournament_name=None):
+        """
+        Fetch tournament game rows with metadata.
+
+        Parameters
+        ----------
+        tournament_id   : str | None  — filter by exact tournament id
+        tournament_name : str | None  — filter by tournament name (substring)
+
+        Returns
+        -------
+        list of dicts with all tournament_games columns
+        """
+        try:
+            conn   = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            query  = 'SELECT * FROM tournament_games'
+            params = []
+            conditions = []
+
+            if tournament_id:
+                conditions.append('tournament_id = ?')
+                params.append(tournament_id)
+            if tournament_name:
+                conditions.append('tournament_name LIKE ?')
+                params.append(f'%{tournament_name}%')
+
+            if conditions:
+                query += ' WHERE ' + ' AND '.join(conditions)
+            query += ' ORDER BY id ASC'
+
+            cursor.execute(query, params)
+            rows = [dict(r) for r in cursor.fetchall()]
+            conn.close()
+            return rows
+        except Exception as e:
+            print(f"[Database] get_tournament_games error: {e}")
+            return []
+
+    def get_tournament_list(self):
+        """
+        Return a summary list of all tournaments stored in the database.
+
+        Returns
+        -------
+        list of dicts:
+            tournament_id, tournament_name, format, game_count,
+            date (of first game)
+
+        FIX: ORDER BY uses MIN(date) DESC so newest-first ordering is correct
+             even when rowid ordering differs from date ordering.
+        """
+        try:
+            conn   = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT tournament_id,
+                       tournament_name,
+                       format,
+                       COUNT(*)  AS game_count,
+                       MIN(date) AS date
+                FROM tournament_games
+                GROUP BY tournament_id
+                ORDER BY MAX(id) DESC
+            ''')
+            rows = [dict(r) for r in cursor.fetchall()]
+            conn.close()
+            return rows
+        except Exception as e:
+            print(f"[Database] get_tournament_list error: {e}")
+            return []
