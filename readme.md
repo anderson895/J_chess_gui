@@ -38,23 +38,8 @@ chess_arena/
 
 ---
 
-## Step 2 — Use `resource_path()` in your script
 
-Before building, make sure `main.py` resolves bundled file paths correctly at runtime:
-```python
-import sys, os
-
-def resource_path(relative_path):
-    """Get absolute path to resource, works for dev and PyInstaller."""
-    base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base_path, relative_path)
-```
-
-Use `resource_path("analyzer/stockfish.exe")` and `resource_path("opening/openings_sheet.csv")` wherever those files are referenced.
-
----
-
-## Step 3 — Run the Build Command
+## Step 2 — Run the Build Command
 ```cmd
 pyinstaller --onefile --windowed --icon=assets/logo.ico --name="ChessEngineArena" --add-data="opening;opening" --add-data="analyzer;analyzer" --add-data="assets;assets" main.py
 ```
@@ -75,7 +60,7 @@ pyinstaller --onefile --windowed --icon=assets/logo.ico --name="ChessEngineArena
 
 ---
 
-## Step 4 — Find Your Output
+## Step 3 — Find Your Output
 ```
 chess_arena/
 `-- dist/
