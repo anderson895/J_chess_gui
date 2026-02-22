@@ -1,6 +1,9 @@
 # Building Chess Engine Arena as a Standalone .exe
 
-This guide explains how to package `chess_arena.py` into a single `.exe` that includes the **Stockfish analyzer**, **opening CSV**, and **app icon** — so end users need nothing installed.
+This guide explains how to package `main.py` into a single `.exe` that includes the **Stockfish analyzer**, **opening CSV**, and **app icon** — so end users need nothing installed.
+
+## Chess Engine Resources
+https://e.pcloud.link/publink/show?lang=en&code=kZHEppZbCDCs9wagDhvjGGM2bo36LEIvynX
 
 ---
 
@@ -9,123 +12,70 @@ This guide explains how to package `chess_arena.py` into a single `.exe` that in
 You need **Windows** (to build a Windows `.exe`) and **Python 3.8+**.
 
 ### Install PyInstaller
-
 ```cmd
 pip install pyinstaller
 ```
 
 ---
 
-## Recommended Project Layout
+## Step 1 — Recommended Project Layout
 
 Set up your folder exactly like this before building:
-
 ```
 chess_arena/
 |
-|-- chess_arena.py
-|-- logo.ico                 <- app icon (must be .ico)
-|-- logo.png                 <- optional PNG for in-app use
+|-- main.py
+|-- assets/
+|   |-- logo.ico
+|   `-- logo.png
 |
 |-- opening/
 |   `-- openings_sheet.csv
 |
 `-- analyzer/
-    `-- stockfish.exe
+    `-- stockfish.exe  (download from https://stockfishchess.org/)
 ```
-
-Build from inside the `chess_arena/` folder.
 
 ---
 
-## Step 1 — Convert your logo to .ico
+## Step 2 — Use `resource_path()` in your script
 
-PyInstaller requires `.ico` format for the Windows taskbar icon.
-
-**Option A — Online (easiest):**
-Upload your image at https://icoconvert.com and download as `logo.ico`.
-
-**Option B — Python with Pillow:**
-
-```cmd
-pip install pillow
-python -c "from PIL import Image; Image.open('logo.png').save('logo.ico', sizes=[(256,256),(128,128),(64,64),(32,32),(16,16)])"
-```
-
-Save the result as `logo.ico` in the project root.
-
----
-
-## Step 2 — Update chess_arena.py for bundled paths
-
-When PyInstaller runs the `.exe`, bundled files are extracted to a temp folder at runtime (`sys._MEIPASS`). You must update the script so it looks there.
-
-**A) Add this helper near the top of `chess_arena.py`** (right after the imports):
-
+Before building, make sure `main.py` resolves bundled file paths correctly at runtime:
 ```python
+import sys, os
+
 def resource_path(relative_path):
-    """Resolve path to a resource — works both as .py and as bundled .exe."""
-    if hasattr(sys, '_MEIPASS'):
-        return os.path.join(sys._MEIPASS, relative_path)
-    try:
-        base = os.path.dirname(os.path.abspath(__file__))
-    except NameError:
-        base = os.getcwd()
-    return os.path.join(base, relative_path)
+    """Get absolute path to resource, works for dev and PyInstaller."""
+    base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
 ```
 
-**B) Replace the `_start_loading` method in `LoadingScreen`** with this version:
-
-```python
-def _start_loading(self):
-    csv_candidates = [
-        resource_path(os.path.join("opening", "openings_sheet.csv")),
-        resource_path(os.path.join("opening", "openings.csv")),
-        resource_path("openings_sheet.csv"),
-        resource_path("openings.csv"),
-    ]
-
-    anal_candidates = [
-        resource_path(os.path.join("analyzer", "stockfish_18_x86-64.exe")),
-        resource_path(os.path.join("analyzer", "stockfish.exe")),
-        resource_path(os.path.join("analyzer", "stockfish_x86-64.exe")),
-        resource_path(os.path.join("analyzer", "stockfish")),
-    ]
-
-    threading.Thread(target=self._load_openings,
-                     args=(csv_candidates,), daemon=True).start()
-    threading.Thread(target=self._load_analyzer,
-                     args=(anal_candidates,), daemon=True).start()
-```
+Use `resource_path("analyzer/stockfish.exe")` and `resource_path("opening/openings_sheet.csv")` wherever those files are referenced.
 
 ---
 
-## Step 3 — Build the .exe
-
-Run this from inside the `chess_arena/` folder:
-
+## Step 3 — Run the Build Command
 ```cmd
-pyinstaller --onefile --windowed --icon=logo.ico --name="ChessEngineArena" --add-data="opening;opening" --add-data="analyzer;analyzer" --add-data="logo.ico;." chess_arena.py
+pyinstaller --onefile --windowed --icon=assets/logo.ico --name="ChessEngineArena" --add-data="opening;opening" --add-data="analyzer;analyzer" --add-data="assets;assets" main.py
 ```
 
-### Flag reference
+### Flag Reference
 
 | Flag | Purpose |
 |------|---------|
 | `--onefile` | Bundle everything into a single `.exe` |
 | `--windowed` | Hide the console window |
-| `--icon=logo.ico` | Set the app icon |
+| `--icon=assets/logo.ico` | Set the app icon |
 | `--name="ChessEngineArena"` | Name of the output `.exe` |
 | `--add-data="opening;opening"` | Bundle the `opening/` folder |
 | `--add-data="analyzer;analyzer"` | Bundle the `analyzer/` folder |
-| `--add-data="logo.ico;."` | Bundle the icon at root level |
+| `--add-data="assets;assets"` | Bundle the `assets/` folder |
 
 > The separator in `--add-data` is `;` on Windows and `:` on Linux/macOS.
 
 ---
 
-## Step 4 — Find your output
-
+## Step 4 — Find Your Output
 ```
 chess_arena/
 `-- dist/
@@ -145,12 +95,12 @@ Users only need the single `.exe` file. No Python, no folders, no setup required
 ## Troubleshooting
 
 **Build fails: logo.ico not found**
-Make sure `logo.ico` is in the same folder as `chess_arena.py`, not inside a subfolder.
+Make sure `logo.ico` is inside the `assets/` folder and the path `assets/logo.ico` is used in the build command.
 
 **App opens then immediately closes**
 Remove `--windowed` to see the error in the console:
 ```cmd
-pyinstaller --onefile --icon=logo.ico --name="ChessEngineArena" --add-data="opening;opening" --add-data="analyzer;analyzer" chess_arena.py
+pyinstaller --onefile --icon=assets/logo.ico --name="ChessEngineArena" --add-data="opening;opening" --add-data="analyzer;analyzer" --add-data="assets;assets" main.py
 ```
 
 **Analyzer not found at runtime**
@@ -159,10 +109,10 @@ You skipped Step 2. The script must use `resource_path()` or Stockfish will not 
 **Windows Defender / antivirus flags the .exe**
 This is common with PyInstaller executables and chess engines combined. Add an exception in Windows Defender for the `dist/` folder during testing. For distribution, consider code signing.
 
-**The .exe is very large (80-150 MB)**
+**The .exe is very large (80–150 MB)**
 Normal — it contains Python, tkinter, and Stockfish. To compress with UPX:
 ```cmd
-pyinstaller --onefile --windowed --upx-dir="C:\path\to\upx" --icon=logo.ico ...
+pyinstaller --onefile --windowed --upx-dir="C:\path\to\upx" --icon=assets/logo.ico ...
 ```
 Download UPX from https://upx.github.io
 
@@ -177,4 +127,6 @@ pyinstaller ChessEngineArena.spec
 ## Full Build Command (copy-paste)
 
 Windows CMD:
-pyinstaller --onefile --windowed --icon=assets/logo.ico --name="ChessEngineArena" --add-data="opening;opening" --add-data="analyzer;analyzer" --add-data="assets/logo.ico;assets" chess_arena.py
+```cmd
+pyinstaller --onefile --windowed --icon=assets/logo.ico --name="ChessEngineArena" --add-data="opening;opening" --add-data="analyzer;analyzer" --add-data="assets;assets" main.py
+```
