@@ -361,15 +361,29 @@ class ChessGUI:
         self._preset_opening_moves = moves
         self._preset_opening_name  = name
         if moves:
-            short = (name[:38] + "…") if name and len(name) > 38 else (name or "")
-            self._preset_lbl.config(text=f"📖 {short}\n({len(moves)} moves)", fg="#00BFFF")
+            short = (name[:28] + "…") if name and len(name) > 28 else (name or "")
+            self._preset_lbl.config(text=f"📖 {short}", fg="#00BFFF")
+            # Update toolbar pick button to show active preset
+            if hasattr(self, '_tbtn_pick'):
+                self._tbtn_pick.config(text=f"📖 {short[:20]}…" if len(short) > 20 else f"📖 {short}",
+                                       fg="#00BFFF", bg=ACCENT)
+            if hasattr(self, '_tbtn_clear_preset'):
+                self._tbtn_clear_preset.config(fg=TEXT)
         else:
-            self._preset_lbl.config(text="♟ Normal start (no preset)", fg="#666")
+            self._preset_lbl.config(text="♟ Normal start", fg="#666")
+            if hasattr(self, '_tbtn_pick'):
+                self._tbtn_pick.config(text="📖 Pick Opening", fg="#00BFFF", bg="#1E1E3A")
+            if hasattr(self, '_tbtn_clear_preset'):
+                self._tbtn_clear_preset.config(fg="#666")
 
     def _clear_opening_preset(self):
         self._preset_opening_moves = []
         self._preset_opening_name  = None
-        self._preset_lbl.config(text="♟ Normal start (no preset)", fg="#666")
+        self._preset_lbl.config(text="♟ Normal start", fg="#666")
+        if hasattr(self, '_tbtn_pick'):
+            self._tbtn_pick.config(text="📖 Pick Opening", fg="#00BFFF", bg="#1E1E3A")
+        if hasattr(self, '_tbtn_clear_preset'):
+            self._tbtn_clear_preset.config(fg="#666")
 
     def _show_game_history(self, filter_engine=None):
         show_game_history(self.root, self.db,
@@ -396,23 +410,108 @@ class ChessGUI:
 
     def _build_ui(self):
         self.root.columnconfigure(1, weight=1)
-        self.root.rowconfigure(0, weight=1)
+        self.root.rowconfigure(1, weight=1)
 
+        # ── Top toolbar (row 0, spans all columns) ────────
+        tb = tk.Frame(self.root, bg="#0F0F1E", height=46)
+        tb.grid(row=0, column=0, columnspan=3, sticky='ew')
+        tb.grid_propagate(False)
+        self._build_toolbar(tb)
+
+        # ── Left panel ────────────────────────────────────
         lp = tk.Frame(self.root, bg=PANEL_BG, width=270)
-        lp.grid(row=0, column=0, sticky='nsew', padx=(8, 0), pady=8)
+        lp.grid(row=1, column=0, sticky='nsew', padx=(8, 0), pady=(4, 8))
         lp.grid_propagate(False)
         self._build_left(lp)
 
+        # ── Center panel ──────────────────────────────────
         cp = tk.Frame(self.root, bg=BG)
-        cp.grid(row=0, column=1, sticky='nsew', padx=8, pady=8)
+        cp.grid(row=1, column=1, sticky='nsew', padx=8, pady=(4, 8))
         cp.columnconfigure(1, weight=1)
         cp.rowconfigure(0, weight=1)
         self._build_center(cp)
 
+        # ── Right panel ───────────────────────────────────
         rp = tk.Frame(self.root, bg=PANEL_BG, width=285)
-        rp.grid(row=0, column=2, sticky='nsew', padx=(0, 8), pady=8)
+        rp.grid(row=1, column=2, sticky='nsew', padx=(0, 8), pady=(4, 8))
         rp.grid_propagate(False)
         self._build_right(rp)
+
+    def _build_toolbar(self, tb):
+        """Top toolbar — app title + view/stats/utility buttons."""
+
+        def _tbtn(parent, text, cmd, accent=False):
+            bg2 = ACCENT if accent else "#1E1E3A"
+            hov = BTN_HOV if accent else "#2E2E5A"
+            b = tk.Button(
+                parent, text=text, command=cmd,
+                bg=bg2, fg=TEXT,
+                activebackground=hov, activeforeground='white',
+                relief='flat', font=('Segoe UI', 9, 'bold'),
+                padx=12, pady=0, cursor='hand2', borderwidth=0,
+                height=2)
+            b.bind('<Enter>', lambda e: b.config(bg=hov))
+            b.bind('<Leave>', lambda e: b.config(bg=bg2))
+            return b
+
+        # App name / logo
+        tk.Label(tb, text="♟  ENGINE ARENA", bg="#0F0F1E", fg=ACCENT,
+                 font=('Segoe UI', 12, 'bold'), padx=14).pack(side='left')
+        tk.Frame(tb, bg=ACCENT, width=2).pack(side='left', fill='y', pady=6, padx=(0, 6))
+
+        # View / stats buttons
+        for txt, cmd in [
+            ("🏆 Rankings",     self._show_rankings),
+            ("📊 Statistics",   self._show_statistics),
+            ("📖 Openings",     self._show_opening_stats),
+            ("📋 Tournaments",  self._tournament_list),
+            ("🕘 History",      self._show_game_history),
+        ]:
+            _tbtn(tb, txt, cmd).pack(side='left', padx=2, pady=5)
+
+        tk.Frame(tb, bg="#2a2a4a", width=2).pack(side='left', fill='y', pady=6, padx=6)
+
+        # Game control buttons in toolbar
+        for txt, cmd, acc in [
+            ("▶ Start",   self._start_game,   True),
+            ("⏸ Pause",   self._toggle_pause, False),
+            ("⏹ Stop",    self._stop_game,    False),
+            ("↺ New",     self._new_game,     False),
+        ]:
+            _tbtn(tb, txt, cmd, accent=acc).pack(side='left', padx=2, pady=5)
+
+        tk.Frame(tb, bg="#2a2a4a", width=2).pack(side='left', fill='y', pady=6, padx=6)
+
+        # Utility
+        for txt, cmd in [
+            ("⇅ Flip",      self._flip_board),
+            ("💾 PGN",      self._export_pgn),
+        ]:
+            _tbtn(tb, txt, cmd).pack(side='left', padx=2, pady=5)
+
+        # Opening preset indicator on the right side of toolbar
+        tk.Frame(tb, bg="#2a2a4a", width=2).pack(side='right', fill='y', pady=6, padx=4)
+        self._tbtn_clear_preset = tk.Button(
+            tb, text="✕", command=self._clear_opening_preset,
+            bg="#1E1E3A", fg="#666",
+            activebackground=BTN_HOV, activeforeground='white',
+            relief='flat', font=('Segoe UI', 8),
+            padx=6, pady=0, cursor='hand2', height=2)
+        self._tbtn_clear_preset.pack(side='right', pady=5)
+        self._tbtn_clear_preset.bind('<Enter>', lambda e: self._tbtn_clear_preset.config(bg=BTN_HOV))
+        self._tbtn_clear_preset.bind('<Leave>', lambda e: self._tbtn_clear_preset.config(bg='#1E1E3A'))
+
+        self._tbtn_pick = tk.Button(
+            tb, text="📖 Pick Opening", command=self._pick_opening,
+            bg="#1E1E3A", fg="#00BFFF",
+            activebackground=BTN_HOV, activeforeground='white',
+            relief='flat', font=('Segoe UI', 9, 'bold'),
+            padx=10, pady=0, cursor='hand2', height=2)
+        self._tbtn_pick.pack(side='right', padx=(0, 2), pady=5)
+        self._tbtn_pick.bind('<Enter>', lambda e: self._tbtn_pick.config(bg=BTN_HOV))
+        self._tbtn_pick.bind('<Leave>', lambda e: self._tbtn_pick.config(bg='#1E1E3A'))
+
+        tk.Frame(tb, bg="#2a2a4a", width=2).pack(side='right', fill='y', pady=6, padx=4)
 
     # ── Widget factory helpers ────────────────────────────
 
@@ -441,8 +540,8 @@ class ChessGUI:
     # ── Left panel ────────────────────────────────────────
 
     def _build_left(self, p):
-        tk.Label(p, text="ENGINE ARENA", bg=PANEL_BG, fg=ACCENT,
-                 font=('Segoe UI', 13, 'bold')).pack(pady=(16, 4))
+        tk.Label(p, text="CONFIGURATION", bg=PANEL_BG, fg=ACCENT,
+                 font=('Segoe UI', 11, 'bold')).pack(pady=(12, 4))
         tk.Frame(p, bg=ACCENT, height=2).pack(fill='x', padx=10, pady=2)
 
         # Play mode radio buttons
@@ -477,34 +576,14 @@ class ChessGUI:
             if fmt: kw['format'] = fmt
             tk.Spinbox(rf, **kw).pack(side='right')
 
+        # Opening preset status (compact)
         tk.Frame(p, bg='#2a2a4a', height=1).pack(fill='x', padx=10, pady=6)
-        for txt, cmd, acc in [
-            ("▶  START GAME",        self._start_game,         True),
-            ("⏸  PAUSE / RESUME",    self._toggle_pause,       False),
-            ("⏹  STOP GAME",         self._stop_game,          False),
-            ("↺  NEW GAME",          self._new_game,           False),
-            ("⇅  FLIP BOARD",        self._flip_board,         False),
-            ("💾  EXPORT PGN",       self._export_pgn,         False),
-            ("🏆  RANKINGS",         self._show_rankings,      False),
-            ("📋  TOURNAMENTS",      self._tournament_list,    False),
-            ("📊  STATISTICS",       self._show_statistics,    False),
-            ("📖  OPENINGS",         self._show_opening_stats, False),
-        ]:
-            self._btn(p, txt, cmd, accent=acc).pack(fill='x', padx=10, pady=2)
-
-        tk.Frame(p, bg='#2a2a4a', height=1).pack(fill='x', padx=10, pady=4)
         self._lbl(p, "🎯 STARTING OPENING", 8, bold=True, fg=ACCENT).pack(fill='x', padx=10)
-        self._preset_lbl = tk.Label(p, text="♟ Normal start (no preset)",
+        self._preset_lbl = tk.Label(p, text="♟ Normal start",
                                      bg=PANEL_BG, fg="#666",
                                      font=('Segoe UI', 7), anchor='w',
                                      wraplength=240, justify='left')
-        self._preset_lbl.pack(fill='x', padx=10, pady=(2, 2))
-        pick_row = tk.Frame(p, bg=PANEL_BG)
-        pick_row.pack(fill='x', padx=10, pady=2)
-        self._btn(pick_row, "📖  Pick Opening", self._pick_opening,
-                  small=True).pack(side='left', fill='x', expand=True)
-        self._btn(pick_row, "✕", self._clear_opening_preset,
-                  small=True).pack(side='right', padx=(4, 0))
+        self._preset_lbl.pack(fill='x', padx=10, pady=(2, 4))
 
         tk.Frame(p, bg='#2a2a4a', height=1).pack(fill='x', padx=10, pady=4)
         self._lbl(p, "Material balance", 8, fg="#888").pack(fill='x', padx=10)

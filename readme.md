@@ -75,5 +75,5 @@ The `build/` folder and `.spec` file are temporary and can be deleted.
 
 Windows CMD:
 ```cmd
-pyinstaller --onefile --windowed --icon=assets/logo.ico --name="ChessEngineArena" --add-data="opening;opening" --add-data="analyzer;analyzer" --add-data="assets;assets" main.py
+python -m PyInstaller --onefile --windowed --icon=assets/logo.ico --name="ChessEngineArena" --add-data="opening;opening" --add-data="analyzer;analyzer" --add-data="assets;assets" main.py
 ```
