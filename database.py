@@ -41,8 +41,7 @@ class Database:
                 pgn               TEXT    NOT NULL,
                 move_count        INTEGER,
                 duration_seconds  INTEGER,
-                source            TEXT    DEFAULT 'regular',
-                game_type         TEXT    DEFAULT 'standard'
+                source            TEXT    DEFAULT 'regular'
             )
         ''')
 
@@ -74,20 +73,13 @@ class Database:
         except sqlite3.OperationalError:
             pass  # Column already exists
 
-        # Add 'game_type' column to existing games table if missing (migration)
-        try:
-            conn.execute("ALTER TABLE games ADD COLUMN game_type TEXT DEFAULT 'standard'")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-
         conn.commit()
         conn.close()
 
     # ── Write ─────────────────────────────────────────────
 
     def save_game(self, white_name, black_name, result, reason,
-                  pgn, move_count, duration_sec, source='regular',
-                  game_type='standard'):
+                  pgn, move_count, duration_sec, source='regular'):
         """Save a game to the games table. Returns the new row id, or None on error."""
         try:
             conn   = sqlite3.connect(self.db_path)
@@ -98,8 +90,8 @@ class Database:
             cursor.execute('''
                 INSERT INTO games
                     (white_engine, black_engine, result, reason,
-                     date, time, pgn, move_count, duration_seconds, source, game_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     date, time, pgn, move_count, duration_seconds, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 normalize_engine_name(white_name),
                 normalize_engine_name(black_name),
@@ -107,7 +99,6 @@ class Database:
                 date_str, time_str,
                 pgn, move_count, duration_sec,
                 source,
-                game_type,
             ))
             conn.commit()
             game_id = cursor.lastrowid
@@ -236,27 +227,13 @@ class Database:
                 loses = matches - wins - draws
                 win_rate = (wins / matches * 100) if matches > 0 else 0
 
-                # ── Game type breakdown ───────────────────
-                type_counts = {'standard': 0, 'chess960': 0, 'opening_preset': 0}
-                cursor.execute(
-                    "SELECT COALESCE(game_type, 'standard'), COUNT(*) FROM games "
-                    "WHERE white_engine = ? OR black_engine = ? "
-                    "GROUP BY game_type",
-                    (engine, engine))
-                for gtype, cnt in cursor.fetchall():
-                    key = gtype if gtype in type_counts else 'standard'
-                    type_counts[key] += cnt
-
                 stats.append({
-                    'engine':           engine,
-                    'matches':          matches,
-                    'wins':             wins,
-                    'draws':            draws,
-                    'loses':            loses,
-                    'win_rate':         win_rate,
-                    'std_games':        type_counts['standard'],
-                    'chess960_games':   type_counts['chess960'],
-                    'preset_games':     type_counts['opening_preset'],
+                    'engine':   engine,
+                    'matches':  matches,
+                    'wins':     wins,
+                    'draws':    draws,
+                    'loses':    loses,
+                    'win_rate': win_rate,
                 })
 
             conn.close()
