@@ -54,10 +54,37 @@ Command: position startpos moves e2e4
 Command: go movetime 1000
 info string Fixed time per move: 1000 ms
 info string Search status is THINKING
-info string Aborting search: time limit 1: 1001
+info string Aborting search: time limit 1: 1014
 ================================================================
 getBestMove: thread_id:0, num_sp:0 searching:0 stop:1 started:0 ended:0 nodes:0 numsplits:0
 bestmove e7e5 ponder b1c3
+
+Command: position startpos moves e2e4 e7e5 g1f3
+Command: go movetime 1000
+info string Fixed time per move: 1000 ms
+info string Search status is THINKING
+info string Aborting search: root time limit 1: 887
+================================================================
+getBestMove: thread_id:0, num_sp:0 searching:0 stop:1 started:0 ended:0 nodes:0 numsplits:0
+bestmove g8f6 ponder b1c3
+
+Command: position startpos moves e2e4 e7e5 g1f3 g8f6 f3e5
+Command: go movetime 1000
+info string Fixed time per move: 1000 ms
+info string Search status is THINKING
+info string Aborting search: root time limit 1: 906
+================================================================
+getBestMove: thread_id:0, num_sp:0 searching:0 stop:1 started:0 ended:0 nodes:0 numsplits:0
+bestmove d8e7 ponder e5f3
+
+Command: position startpos moves e2e4 e7e5 g1f3 g8f6 f3e5 d8e7 d2d4
+Command: go movetime 1000
+info string Fixed time per move: 1000 ms
+info string Search status is THINKING
+info string Aborting search: root time limit 1: 822
+================================================================
+getBestMove: thread_id:0, num_sp:0 searching:0 stop:1 started:0 ended:0 nodes:0 numsplits:0
+bestmove d7d6 ponder e5f3
 
 Command: stop
 Command: quit
